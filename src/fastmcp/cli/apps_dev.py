@@ -882,13 +882,15 @@ def _model_from_schema(tool_name: str, input_schema: dict[str, Any]) -> type[Any
                 ]
                 if non_null:
                     types = [t.get("type") for t in non_null if "type" in t]
+                    # Prefer object/array (need textarea for JSON editing),
+                    # then string (most versatile text input), then scalars.
                     for candidate in (
                         "object",
                         "array",
+                        "string",
                         "integer",
                         "number",
                         "boolean",
-                        "string",
                     ):
                         if candidate in types:
                             json_type = candidate
