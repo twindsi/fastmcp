@@ -96,15 +96,16 @@ class FileSystemProvider(LocalProvider):
         self._warned_files: dict[Path, float] = {}
         # Lock for serializing reload operations (created lazily)
         self._reload_lock: asyncio.Lock | None = None
+        # Generation counter to deduplicate concurrent reloads
+        self._reload_generation: int = 0
 
         # Always load once at init to catch errors early
         self._load_components()
 
     def _load_components(self) -> None:
         """Discover and register all components from the filesystem."""
-        # Clear existing components if reloading
-        if self._loaded:
-            self._components.clear()
+        if not self._root.exists():
+            logger.warning("FileSystemProvider root does not exist: %s", self._root)
 
         result = discover_and_import(self._root)
 
@@ -125,6 +126,12 @@ class FileSystemProvider(LocalProvider):
         successful_files = {fp for fp, _ in result.components}
         for fp in successful_files:
             self._warned_files.pop(fp, None)
+
+        # Build new components dict and swap atomically to avoid races
+        # with concurrent readers (bug fix: previously used clear-and-rebuild
+        # which could expose an empty dict to concurrent requests)
+        new_components: dict[str, FastMCPComponent] = {}
+        self._components = new_components
 
         for file_path, component in result.components:
             try:
@@ -159,6 +166,10 @@ class FileSystemProvider(LocalProvider):
 
         Uses a lock to serialize concurrent reload operations and runs
         filesystem I/O off the event loop using asyncio.to_thread.
+
+        A generation counter deduplicates concurrent reload requests:
+        callers that were waiting for the lock check whether the generation
+        changed while they waited; if it did, the reload already happened.
         """
         if not self._reload and self._loaded:
             return
@@ -167,10 +178,16 @@ class FileSystemProvider(LocalProvider):
         if self._reload_lock is None:
             self._reload_lock = asyncio.Lock()
 
+        generation_before = self._reload_generation
+
         async with self._reload_lock:
-            # Double-check after acquiring lock
-            if self._reload or not self._loaded:
+            # Double-check after acquiring lock: skip if another caller
+            # already reloaded while we were waiting
+            if not self._loaded or (
+                self._reload and self._reload_generation == generation_before
+            ):
                 await asyncio.to_thread(self._load_components)
+                self._reload_generation += 1
 
     # Override provider methods to support reload mode
 

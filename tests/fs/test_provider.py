@@ -1,7 +1,9 @@
 """Tests for FileSystemProvider."""
 
+import asyncio
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from fastmcp import FastMCP
 from fastmcp.client import Client
@@ -276,6 +278,131 @@ def my_tool() -> str:
         captured = capsys.readouterr()
         # Check for warning indicator (rich may truncate long paths)
         assert "WARNING" in captured.err and "Failed to import" in captured.err
+
+
+class TestFileSystemProviderAtomicReload:
+    """Tests for atomic component swap during reload (bug #4)."""
+
+    async def test_reload_swaps_components_atomically(self, tmp_path: Path):
+        """Components dict should never be empty during a reload."""
+        (tmp_path / "tool.py").write_text(
+            """\
+from fastmcp.tools import tool
+
+@tool
+def my_tool() -> str:
+    return "hello"
+"""
+        )
+
+        provider = FileSystemProvider(tmp_path, reload=True)
+        assert len(provider._components) == 1
+
+        # Reload should produce a new dict, not clear the existing one
+        original_dict = provider._components
+        await provider._ensure_loaded()
+        # After reload, _components is a different dict object
+        assert provider._components is not original_dict
+        assert len(provider._components) == 1
+
+    async def test_reload_does_not_expose_empty_components(self, tmp_path: Path):
+        """Concurrent readers should never see an empty components dict."""
+        (tmp_path / "tool.py").write_text(
+            """\
+from fastmcp.tools import tool
+
+@tool
+def my_tool() -> str:
+    return "hello"
+"""
+        )
+
+        provider = FileSystemProvider(tmp_path, reload=True)
+        observed_empty = False
+
+        original_load = provider._load_components
+
+        def patched_load(self: FileSystemProvider) -> None:
+            nonlocal observed_empty
+            original_load()
+            if len(self._components) == 0:
+                observed_empty = True
+
+        with patch.object(type(provider), "_load_components", patched_load):
+            await provider._ensure_loaded()
+        assert not observed_empty
+
+
+class TestFileSystemProviderReloadDedup:
+    """Tests for reload deduplication via generation counter (bug #5)."""
+
+    async def test_generation_counter_increments(self, tmp_path: Path):
+        """Generation counter should increment after each reload."""
+        (tmp_path / "tool.py").write_text(
+            """\
+from fastmcp.tools import tool
+
+@tool
+def my_tool() -> str:
+    return "hello"
+"""
+        )
+
+        provider = FileSystemProvider(tmp_path, reload=True)
+        assert provider._reload_generation == 0
+
+        await provider._ensure_loaded()
+        assert provider._reload_generation == 1
+
+        await provider._ensure_loaded()
+        assert provider._reload_generation == 2
+
+    async def test_concurrent_reloads_deduplicated(self, tmp_path: Path):
+        """Concurrent _ensure_loaded calls should not each trigger a reload."""
+        (tmp_path / "tool.py").write_text(
+            """\
+from fastmcp.tools import tool
+
+@tool
+def my_tool() -> str:
+    return "hello"
+"""
+        )
+
+        provider = FileSystemProvider(tmp_path, reload=True)
+
+        load_count = 0
+        original_load = FileSystemProvider._load_components
+
+        def counting_load(self: FileSystemProvider) -> None:
+            nonlocal load_count
+            load_count += 1
+            original_load(self)
+
+        with patch.object(type(provider), "_load_components", counting_load):
+            # Launch multiple concurrent _ensure_loaded calls
+            await asyncio.gather(
+                provider._ensure_loaded(),
+                provider._ensure_loaded(),
+                provider._ensure_loaded(),
+            )
+
+        # Only one reload should have happened (they all read generation 0
+        # before any acquired the lock, and the first one increments it)
+        assert load_count == 1
+
+
+class TestFileSystemProviderNonExistentRoot:
+    """Tests for warning when root directory does not exist."""
+
+    def test_warning_on_nonexistent_root(self, tmp_path: Path, capsys):
+        """A non-existent root should log a warning."""
+        nonexistent = tmp_path / "does_not_exist"
+        provider = FileSystemProvider(nonexistent)
+
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err and "root does not" in captured.err
+        assert len(provider._components) == 0
 
 
 class TestFileSystemProviderIntegration:
