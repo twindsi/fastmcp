@@ -1,4 +1,3 @@
-import asyncio
 import importlib
 import json
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,7 +14,8 @@ from fastmcp.server.transforms.search.base import (
     serialize_tools_for_output_json,
     serialize_tools_for_output_markdown,
 )
-from fastmcp.tools.tool import Tool, ToolResult
+from fastmcp.tools.base import Tool, ToolResult
+from fastmcp.utilities.async_utils import is_coroutine_function
 from fastmcp.utilities.versions import VersionSpec
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ DiscoveryToolFactory = Callable[[GetToolCatalog], Tool]
 
 
 def _ensure_async(fn: Callable[..., Any]) -> Callable[..., Any]:
-    if asyncio.iscoroutinefunction(fn):
+    if is_coroutine_function(fn):
         return fn
 
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -130,7 +130,6 @@ class MontySandboxProvider:
         monty = pydantic_monty.Monty(
             code,
             inputs=list(inputs.keys()),
-            external_functions=list(async_functions.keys()),
         )
         run_kwargs: dict[str, Any] = {"external_functions": async_functions}
         if inputs:
@@ -229,7 +228,7 @@ class Search:
                 int | None,
                 "Maximum number of results to return",
             ] = default_limit,
-            ctx: Context = None,  # type: ignore[assignment]
+            ctx: Context = None,  # type: ignore[assignment]  # ty:ignore[invalid-parameter-default]
         ) -> str:
             """Search for available tools by query.
 
@@ -292,7 +291,7 @@ class GetSchemas:
                 ToolDetailLevel,
                 "'brief' for names and descriptions, 'detailed' for parameter schemas as markdown, 'full' for complete JSON schemas",
             ] = default_detail,
-            ctx: Context = None,  # type: ignore[assignment]
+            ctx: Context = None,  # type: ignore[assignment]  # ty:ignore[invalid-parameter-default]
         ) -> str:
             """Get parameter schemas for specific tools.
 
@@ -350,7 +349,7 @@ class GetTags:
                 Literal["brief", "full"],
                 "Level of detail: 'brief' for tag names and counts, 'full' for tools listed under each tag",
             ] = default_detail,
-            ctx: Context = None,  # type: ignore[assignment]
+            ctx: Context = None,  # type: ignore[assignment]  # ty:ignore[invalid-parameter-default]
         ) -> str:
             """List available tool tags.
 
@@ -415,7 +414,7 @@ class ListTools:
                 ToolDetailLevel,
                 "'brief' for names and descriptions, 'detailed' for parameter schemas as markdown, 'full' for complete JSON schemas",
             ] = default_detail,
-            ctx: Context = None,  # type: ignore[assignment]
+            ctx: Context = None,  # type: ignore[assignment]  # ty:ignore[invalid-parameter-default]
         ) -> str:
             """List all available tools.
 
@@ -538,7 +537,7 @@ class CodeMode(CatalogTransform):
                     )
                 ),
             ],
-            ctx: Context = None,  # type: ignore[assignment]
+            ctx: Context = None,  # type: ignore[assignment]  # ty:ignore[invalid-parameter-default]
         ) -> Any:
             """Execute tool calls using Python code."""
 

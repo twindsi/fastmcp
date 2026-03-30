@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 import mcp.types
 from mcp import GetPromptResult
 from mcp.types import (
+    AudioContent,
     EmbeddedResource,
     Icon,
+    ImageContent,
     PromptMessage,
     TextContent,
 )
@@ -27,6 +29,7 @@ from mcp.types import PromptArgument as SDKPromptArgument
 from pydantic import Field
 from pydantic.json_schema import SkipJsonSchema
 
+from fastmcp.exceptions import FastMCPDeprecationWarning
 from fastmcp.server.auth.authorization import AuthCheck
 from fastmcp.server.tasks.config import TaskConfig, TaskMeta
 from fastmcp.utilities.components import FastMCPComponent
@@ -61,7 +64,7 @@ class Message(pydantic.BaseModel):
     """
 
     role: Literal["user", "assistant"]
-    content: TextContent | EmbeddedResource
+    content: TextContent | ImageContent | AudioContent | EmbeddedResource
 
     def __init__(
         self,
@@ -72,13 +75,18 @@ class Message(pydantic.BaseModel):
 
         Args:
             content: The message content. str passes through directly.
-                     TextContent and EmbeddedResource pass through.
+                     TextContent, ImageContent, AudioContent, and
+                     EmbeddedResource pass through.
                      Other types (dict, list, BaseModel) are JSON-serialized.
             role: The message role, either "user" or "assistant".
         """
         # Handle already-wrapped content types
-        if isinstance(content, (TextContent, EmbeddedResource)):
-            normalized_content: TextContent | EmbeddedResource = content
+        if isinstance(
+            content, (TextContent, ImageContent, AudioContent, EmbeddedResource)
+        ):
+            normalized_content: (
+                TextContent | ImageContent | AudioContent | EmbeddedResource
+            ) = content
         elif isinstance(content, str):
             normalized_content = TextContent(type="text", text=content)
         else:
@@ -183,7 +191,7 @@ class PromptResult(pydantic.BaseModel):
         return GetPromptResult(
             description=self.description,
             messages=mcp_messages,
-            _meta=self.meta,  # type: ignore[call-arg]  # _meta is Pydantic alias for meta field
+            _meta=self.meta,  # type: ignore[call-arg]  # _meta is Pydantic alias for meta field  # ty:ignore[unknown-argument]
         )
 
 
@@ -221,7 +229,7 @@ class Prompt(FastMCPComponent):
             icons=overrides.get("icons", self.icons),
             _meta=overrides.get(  # type: ignore[call-arg]  # _meta is Pydantic alias for meta field
                 "_meta", self.get_meta()
-            ),
+            ),  # ty:ignore[unknown-argument]
         )
 
     @classmethod
@@ -422,7 +430,7 @@ def __getattr__(name: str) -> Any:
             warnings.warn(
                 f"Importing {name} from fastmcp.prompts.prompt is deprecated. "
                 f"Import from fastmcp.prompts.function_prompt instead.",
-                DeprecationWarning,
+                FastMCPDeprecationWarning,
                 stacklevel=2,
             )
         from fastmcp.prompts import function_prompt

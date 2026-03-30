@@ -3,12 +3,14 @@
 import pytest
 from key_value.aio.stores.memory import MemoryStore
 
+from fastmcp.server.auth.auth import MultiAuth
 from fastmcp.server.auth.providers.azure import (
     OIDC_SCOPES,
     AzureJWTVerifier,
     AzureProvider,
+    _find_azure_provider,
 )
-from fastmcp.server.auth.providers.jwt import RSAKeyPair
+from fastmcp.server.auth.providers.jwt import RSAKeyPair, StaticTokenVerifier
 
 
 @pytest.fixture
@@ -147,23 +149,60 @@ class TestOIDCScopeHandling:
         # Token validator should only require non-OIDC scopes
         assert provider._token_validator.required_scopes == ["read"]
 
-    def test_required_scopes_all_oidc_results_in_no_validation(
+    def test_required_scopes_all_oidc_raises_value_error(
         self, memory_storage: MemoryStore
     ):
-        """Test that if all required_scopes are OIDC, no scope validation occurs."""
-        provider = AzureProvider(
-            client_id="test_client",
-            client_secret="test_secret",
-            tenant_id="test-tenant",
-            base_url="https://myserver.com",
-            identifier_uri="api://my-api",
-            required_scopes=["openid", "profile"],
-            jwt_signing_key="test-secret",
-            client_storage=memory_storage,
-        )
+        """Test that providing only OIDC scopes raises ValueError."""
+        with pytest.raises(ValueError, match="at least one non-OIDC scope"):
+            AzureProvider(
+                client_id="test_client",
+                client_secret="test_secret",
+                tenant_id="test-tenant",
+                base_url="https://myserver.com",
+                identifier_uri="api://my-api",
+                required_scopes=["openid", "profile"],
+                jwt_signing_key="test-secret",
+                client_storage=memory_storage,
+            )
 
-        # Token validator should have empty required scopes (all were OIDC)
-        assert provider._token_validator.required_scopes == []
+    def test_empty_required_scopes_raises_value_error(
+        self, memory_storage: MemoryStore
+    ):
+        """Test that providing empty required_scopes raises ValueError."""
+        with pytest.raises(ValueError, match="at least one non-OIDC scope"):
+            AzureProvider(
+                client_id="test_client",
+                client_secret="test_secret",
+                tenant_id="test-tenant",
+                base_url="https://myserver.com",
+                identifier_uri="api://my-api",
+                required_scopes=[],
+                jwt_signing_key="test-secret",
+                client_storage=memory_storage,
+            )
+
+    @pytest.mark.parametrize(
+        "scopes",
+        [
+            ["offline_access"],
+            ["openid", "email", "profile", "offline_access"],
+            ["email"],
+        ],
+    )
+    def test_only_oidc_scopes_raises_value_error(
+        self, memory_storage: MemoryStore, scopes: list[str]
+    ):
+        """Test that various OIDC-only scope combinations raise ValueError."""
+        with pytest.raises(ValueError, match="at least one non-OIDC scope"):
+            AzureProvider(
+                client_id="test_client",
+                client_secret="test_secret",
+                tenant_id="test-tenant",
+                base_url="https://myserver.com",
+                required_scopes=scopes,
+                jwt_signing_key="test-secret",
+                client_storage=memory_storage,
+            )
 
     def test_valid_scopes_includes_oidc_scopes(self, memory_storage: MemoryStore):
         """Test that valid_scopes advertises OIDC scopes to clients."""
@@ -688,3 +727,42 @@ class TestAzureOBOIntegration:
 
         dep = _EntraOBOToken(["scope"])
         assert isinstance(dep, Dependency)
+
+
+class TestFindAzureProvider:
+    """Tests for _find_azure_provider helper used by EntraOBOToken."""
+
+    def test_returns_azure_provider_directly(self, memory_storage):
+        """When auth is an AzureProvider, return it directly."""
+        provider = AzureProvider(
+            tenant_id="test-tenant",
+            client_id="test-client",
+            client_secret="test-secret",
+            client_storage=memory_storage,
+            base_url="https://example.com",
+            required_scopes=["read"],
+        )
+        assert _find_azure_provider(provider) is provider
+
+    def test_unwraps_multiauth_with_azure_server(self, memory_storage):
+        """When auth is a MultiAuth wrapping an AzureProvider, return the inner provider."""
+        provider = AzureProvider(
+            tenant_id="test-tenant",
+            client_id="test-client",
+            client_secret="test-secret",
+            client_storage=memory_storage,
+            base_url="https://example.com",
+            required_scopes=["read"],
+        )
+        multi = MultiAuth(server=provider)
+        assert _find_azure_provider(multi) is provider
+
+    def test_returns_none_for_no_auth(self):
+        """When auth is None, return None."""
+        assert _find_azure_provider(None) is None
+
+    def test_returns_none_for_multiauth_without_azure_server(self):
+        """When MultiAuth has no server or a non-Azure server, return None."""
+        verifier = StaticTokenVerifier(tokens={"t": {"client_id": "c", "scopes": []}})
+        multi = MultiAuth(verifiers=[verifier])
+        assert _find_azure_provider(multi) is None

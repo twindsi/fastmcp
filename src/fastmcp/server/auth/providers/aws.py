@@ -23,10 +23,11 @@ Example:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from key_value.aio.protocols import AsyncKeyValue
 from pydantic import AnyHttpUrl
 
-from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -108,8 +109,9 @@ class AWSCognitoProvider(OIDCProxy):
         allowed_client_redirect_uris: list[str] | None = None,
         client_storage: AsyncKeyValue | None = None,
         jwt_signing_key: str | bytes | None = None,
-        require_authorization_consent: bool = True,
+        require_authorization_consent: bool | Literal["external"] = True,
         consent_csp_policy: str | None = None,
+        forward_resource: bool = True,
     ):
         """Initialize AWS Cognito OAuth provider.
 
@@ -134,7 +136,9 @@ class AWSCognitoProvider(OIDCProxy):
             require_authorization_consent: Whether to require user consent before authorizing clients (default True).
                 When True, users see a consent screen before being redirected to AWS Cognito.
                 When False, authorization proceeds directly without user confirmation.
-                SECURITY WARNING: Only disable for local development or testing environments.
+                When "external", the built-in consent screen is skipped but no warning is
+                logged, indicating that consent is handled externally (e.g. by the upstream IdP).
+                SECURITY WARNING: Only set to False for local development or testing environments.
         """
         # Parse scopes if provided as string
         required_scopes_final = (
@@ -147,6 +151,7 @@ class AWSCognitoProvider(OIDCProxy):
         # Store Cognito-specific info for claim filtering
         self.user_pool_id = user_pool_id
         self.aws_region = aws_region
+        self.client_id = client_id
 
         # Initialize OIDC proxy with Cognito discovery
         super().__init__(
@@ -163,6 +168,7 @@ class AWSCognitoProvider(OIDCProxy):
             jwt_signing_key=jwt_signing_key,
             require_authorization_consent=require_authorization_consent,
             consent_csp_policy=consent_csp_policy,
+            forward_resource=forward_resource,
         )
 
         logger.debug(
@@ -178,7 +184,7 @@ class AWSCognitoProvider(OIDCProxy):
         audience: str | None = None,
         required_scopes: list[str] | None = None,
         timeout_seconds: int | None = None,
-    ) -> TokenVerifier:
+    ) -> AWSCognitoTokenVerifier:
         """Creates a Cognito-specific token verifier with claim filtering.
 
         Args:
@@ -189,7 +195,7 @@ class AWSCognitoProvider(OIDCProxy):
         """
         return AWSCognitoTokenVerifier(
             issuer=str(self.oidc_config.issuer),
-            audience=audience,
+            audience=audience or self.client_id,
             algorithm=algorithm,
             jwks_uri=str(self.oidc_config.jwks_uri),
             required_scopes=required_scopes,

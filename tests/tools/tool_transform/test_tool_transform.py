@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from fastmcp.client.client import Client
 from fastmcp.tools import Tool, forward, forward_raw, tool
+from fastmcp.tools.base import ToolResult
 from fastmcp.tools.function_tool import FunctionTool
-from fastmcp.tools.tool import ToolResult
 from fastmcp.tools.tool_transform import (
     ArgTransform,
     TransformedTool,
@@ -428,13 +428,13 @@ async def test_fn_with_kwargs_dropped_args_not_in_kwargs(add_tool):
 
 async def test_forward_outside_context_raises_error():
     """Test that forward() raises error when called outside transform context."""
-    with pytest.raises(RuntimeError, match="forward\(\) can only be called"):
+    with pytest.raises(RuntimeError, match=r"forward\(\) can only be called"):
         await forward(x=1)
 
 
 async def test_forward_raw_outside_context_raises_error():
     """Test that forward_raw() raises error when called outside transform context."""
-    with pytest.raises(RuntimeError, match="forward_raw\(\) can only be called"):
+    with pytest.raises(RuntimeError, match=r"forward_raw\(\) can only be called"):
         await forward_raw(x=1)
 
 
@@ -478,6 +478,20 @@ def test_transform_args_creates_duplicate_names(add_tool):
             transform_args={
                 "old_x": ArgTransform(name="same_name"),
                 "old_y": ArgTransform(name="same_name"),
+            },
+        )
+
+
+def test_transform_args_collision_with_passthrough_name(add_tool):
+    """Test that renaming to a passthrough parameter name raises ValueError."""
+    with pytest.raises(
+        ValueError,
+        match="Multiple arguments would be mapped to the same names: old_y",
+    ):
+        Tool.from_tool(
+            add_tool,
+            transform_args={
+                "old_x": ArgTransform(name="old_y"),
             },
         )
 
