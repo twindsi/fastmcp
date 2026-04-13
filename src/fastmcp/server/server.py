@@ -606,7 +606,10 @@ class FastMCP(
         and middleware execution. Returns all versions (no deduplication).
         Protocol handlers deduplicate for MCP wire format.
         """
-        async with fastmcp.server.context.Context(fastmcp=self) as ctx:
+        with server_span(
+            "tools/list", "tools/list", self.name, "tool", ""
+        ):
+          async with fastmcp.server.context.Context(fastmcp=self) as ctx:
             if run_middleware:
                 mw_context = MiddlewareContext(
                     message=mcp.types.ListToolsRequest(method="tools/list"),
@@ -740,7 +743,10 @@ class FastMCP(
         and middleware execution. Returns all versions (no deduplication).
         Protocol handlers deduplicate for MCP wire format.
         """
-        async with fastmcp.server.context.Context(fastmcp=self) as ctx:
+        with server_span(
+            "resources/list", "resources/list", self.name, "resource", ""
+        ):
+          async with fastmcp.server.context.Context(fastmcp=self) as ctx:
             if run_middleware:
                 mw_context = MiddlewareContext(
                     message={},
@@ -871,7 +877,14 @@ class FastMCP(
         auth filtering, and middleware execution. Returns all versions (no deduplication).
         Protocol handlers deduplicate for MCP wire format.
         """
-        async with fastmcp.server.context.Context(fastmcp=self) as ctx:
+        with server_span(
+            "resources/templates/list",
+            "resources/templates/list",
+            self.name,
+            "resource_template",
+            "",
+        ):
+          async with fastmcp.server.context.Context(fastmcp=self) as ctx:
             if run_middleware:
                 mw_context = MiddlewareContext(
                     message={},
@@ -997,7 +1010,10 @@ class FastMCP(
         and middleware execution. Returns all versions (no deduplication).
         Protocol handlers deduplicate for MCP wire format.
         """
-        async with fastmcp.server.context.Context(fastmcp=self) as ctx:
+        with server_span(
+            "prompts/list", "prompts/list", self.name, "prompt", ""
+        ):
+          async with fastmcp.server.context.Context(fastmcp=self) as ctx:
             if run_middleware:
                 mw_context = MiddlewareContext(
                     message={},

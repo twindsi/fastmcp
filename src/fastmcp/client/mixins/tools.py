@@ -53,12 +53,18 @@ class ClientToolsMixin:
             RuntimeError: If called while the client is not connected.
             McpError: If the request results in a TimeoutError | JSONRPCError
         """
-        logger.debug(f"[{self.name}] called list_tools")
+        with client_span(
+            "tools/list",
+            "tools/list",
+            "",
+            session_id=self.transport.get_session_id(),
+        ):
+            logger.debug(f"[{self.name}] called list_tools")
 
-        result = await self._await_with_session_monitoring(
-            self.session.list_tools(cursor=cursor)
-        )
-        return result
+            result = await self._await_with_session_monitoring(
+                self.session.list_tools(cursor=cursor)
+            )
+            return result
 
     async def list_tools(
         self: Client,
