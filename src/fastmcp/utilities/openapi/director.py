@@ -80,7 +80,10 @@ class RequestDirector:
         if route.request_body and route.request_body.content_schema:
             declared_content_type = next(iter(route.request_body.content_schema))
 
-        cookies = cookie_params if cookie_params else None
+        # httpx requires cookie values to be strings
+        cookies = (
+            {k: str(v) for k, v in cookie_params.items()} if cookie_params else None
+        )
 
         # Step 6: Handle request body
         if body is not None:
@@ -88,10 +91,12 @@ class RequestDirector:
                 body, dict
             ):
                 # httpx requires files= for multipart/form-data encoding.
-                # Wrap plain values as (None, value) tuples so httpx treats
-                # them as form fields rather than file uploads.
+                # Wrap plain values as (None, str(value)) tuples so httpx
+                # treats them as form fields. Scalars must be stringified
+                # because httpx rejects non-string/bytes values.
                 files = {
-                    k: v if isinstance(v, tuple) else (None, v) for k, v in body.items()
+                    k: v if isinstance(v, tuple) else (None, str(v))
+                    for k, v in body.items()
                 }
                 return httpx.Request(
                     method=method,
