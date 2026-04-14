@@ -85,39 +85,27 @@ class RequestDirector:
             {k: str(v) for k, v in cookie_params.items()} if cookie_params else None
         )
 
-        # Step 6: Handle request body
+        # Step 6: Handle request body — dispatch on declared content type.
+        # httpx body kwargs (json, content, data, files) are mutually exclusive
+        # but all accept None, so we set exactly one and pass all to Request().
+        files: dict[str, Any] | None = None
+        data: dict[str, Any] | None = None
         if body is not None:
             if declared_content_type == "multipart/form-data" and isinstance(
                 body, dict
             ):
-                # httpx requires files= for multipart/form-data encoding.
                 # Wrap plain values as (None, str(value)) tuples so httpx
                 # treats them as form fields. Scalars must be stringified
-                # because httpx rejects non-string/bytes values.
+                # because httpx rejects non-string/bytes values in files=.
                 files = {
                     k: v if isinstance(v, tuple) else (None, str(v))
                     for k, v in body.items()
                 }
-                return httpx.Request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    headers=headers,
-                    files=files,
-                    cookies=cookies,
-                )
             elif (
                 declared_content_type == "application/x-www-form-urlencoded"
                 and isinstance(body, dict)
             ):
-                return httpx.Request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    headers=headers,
-                    data=body,
-                    cookies=cookies,
-                )
+                data = body
             elif isinstance(body, dict | list):
                 if (
                     declared_content_type is not None
@@ -144,6 +132,8 @@ class RequestDirector:
             headers=headers,
             json=json_body,
             content=content,
+            data=data,
+            files=files,
             cookies=cookies,
         )
 
