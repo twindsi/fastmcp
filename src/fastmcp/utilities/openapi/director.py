@@ -94,11 +94,12 @@ class RequestDirector:
             if declared_content_type == "multipart/form-data" and isinstance(
                 body, dict
             ):
-                # Wrap plain values as (None, str(value)) tuples so httpx
+                # Wrap plain values as (None, stringified) tuples so httpx
                 # treats them as form fields. Scalars must be stringified
                 # because httpx rejects non-string/bytes values in files=.
+                # Use _query_scalar_to_str for booleans (true/false, not True/False).
                 files = {
-                    k: v if isinstance(v, tuple) else (None, str(v))
+                    k: v if isinstance(v, tuple) else (None, _query_scalar_to_str(v))
                     for k, v in body.items()
                 }
             elif (

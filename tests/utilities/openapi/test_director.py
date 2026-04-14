@@ -1292,7 +1292,35 @@ class TestContentTypeDispatch:
         request.read()
         body = request.content.decode("utf-8")
         assert "42" in body
-        assert "True" in body
+        assert "true" in body
+
+    def test_multipart_preserves_tuple_values(self, director):
+        """Tuple values (file-like) are passed through unchanged to httpx files=."""
+        route = HTTPRoute(
+            path="/upload",
+            method="POST",
+            operation_id="upload",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "multipart/form-data": {
+                        "type": "object",
+                        "properties": {"file": {"type": "string"}},
+                    }
+                },
+            ),
+            parameter_map={
+                "file": {"location": "body", "openapi_name": "file"},
+            },
+        )
+        # Tuple values represent file-like objects for httpx
+        request = director.build(route, {"file": ("report.csv", b"a,b,c")})
+        content_type = request.headers.get("content-type", "")
+        assert "multipart/form-data" in content_type
+        request.read()
+        body = request.content.decode("utf-8", errors="replace")
+        assert "report.csv" in body
+        assert "a,b,c" in body
 
     def test_json_body_still_works(self, director, json_route):
         """application/json bodies should still be sent as JSON (regression)."""
