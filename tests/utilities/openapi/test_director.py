@@ -1261,6 +1261,39 @@ class TestContentTypeDispatch:
         assert "username=alice" in body_text
         assert "password=secret" in body_text
 
+    def test_multipart_stringifies_non_string_values(self, director):
+        """Non-string scalars (int, bool) must be stringified for httpx files=."""
+        route = HTTPRoute(
+            path="/submit",
+            method="POST",
+            operation_id="submit",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "multipart/form-data": {
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "integer"},
+                            "active": {"type": "boolean"},
+                        },
+                    }
+                },
+            ),
+            parameter_map={
+                "count": {"location": "body", "openapi_name": "count"},
+                "active": {"location": "body", "openapi_name": "active"},
+            },
+        )
+        # Should not raise — non-string values get str() converted
+        request = director.build(route, {"count": 42, "active": True})
+        content_type = request.headers.get("content-type", "")
+        assert "multipart/form-data" in content_type
+        # Multipart requests are streaming; read to verify content
+        request.read()
+        body = request.content.decode("utf-8")
+        assert "42" in body
+        assert "True" in body
+
     def test_json_body_still_works(self, director, json_route):
         """application/json bodies should still be sent as JSON (regression)."""
         request = director.build(
@@ -1340,3 +1373,25 @@ class TestCookieParameters:
         )
         assert "session_id" in request.headers.get("cookie", "")
         assert "xyz789" in request.headers.get("cookie", "")
+
+    def test_cookie_non_string_value_stringified(self, director):
+        """Non-string cookie values (e.g. int) must be stringified for httpx."""
+        route = HTTPRoute(
+            path="/api",
+            method="GET",
+            operation_id="get_api",
+            parameters=[
+                ParameterInfo(
+                    name="version",
+                    location="cookie",
+                    required=True,
+                    schema={"type": "integer"},
+                ),
+            ],
+            parameter_map={
+                "version": {"location": "cookie", "openapi_name": "version"},
+            },
+        )
+        request = director.build(route, {"version": 3})
+        assert "version" in request.headers.get("cookie", "")
+        assert "3" in request.headers.get("cookie", "")
