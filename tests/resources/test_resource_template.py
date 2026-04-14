@@ -828,6 +828,30 @@ class TestMalformedURITemplates:
         result = await mcp.read_resource("data://alice/profile")
         assert "profile for alice" in str(result)
 
+    def test_build_regex_normalizes_wildcard_hyphens(self):
+        """Wildcard params with hyphens also get underscored groups."""
+        regex = build_regex("files://{file-path*}")
+        assert regex is not None
+        match = regex.match("files://a/b/c")
+        assert match is not None
+        assert match.group("file_path") == "a/b/c"
+
+    def test_expand_uri_template_with_hyphens(self):
+        """expand_uri_template maps underscored params to hyphenated placeholders."""
+        result = expand_uri_template(
+            "data://{user-id}/profile", {"user_id": "alice"}
+        )
+        assert result == "data://alice/profile"
+
+    def test_query_param_does_not_clobber_path_param(self):
+        """If path and query have the same normalized name, path wins."""
+        result = match_uri_template(
+            "test://alice?user-id=bob", "test://{user-id}{?user-id}"
+        )
+        # path param should be 'alice', not clobbered by query 'bob'
+        assert result is not None
+        assert result["user_id"] == "alice"
+
     def test_build_regex_still_works_for_valid_templates(self):
         regex = build_regex("test://{name}/{id}")
         assert regex is not None
