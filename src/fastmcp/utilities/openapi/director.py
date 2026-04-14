@@ -76,11 +76,13 @@ class RequestDirector:
         content: str | bytes | None = None
 
         # Step 5: Determine the declared content type from the OpenAPI spec.
-        # Strip parameters (e.g. "; charset=utf-8") for dispatch matching.
+        # Use the raw value for outgoing Content-Type headers (preserves
+        # parameters like charset), but normalize for dispatch matching.
+        raw_content_type: str | None = None
         declared_content_type: str | None = None
         if route.request_body and route.request_body.content_schema:
-            raw_ct = next(iter(route.request_body.content_schema))
-            declared_content_type = raw_ct.split(";")[0].strip().lower()
+            raw_content_type = next(iter(route.request_body.content_schema))
+            declared_content_type = raw_content_type.split(";")[0].strip().lower()
 
         # httpx requires cookie values to be strings; use OpenAPI-style
         # serialization (e.g. true/false for booleans, not True/False)
@@ -124,7 +126,7 @@ class RequestDirector:
                     # sets application/json.
                     content = _json.dumps(body, allow_nan=False).encode("utf-8")
                     headers = dict(headers) if headers else {}
-                    headers["Content-Type"] = declared_content_type
+                    headers["Content-Type"] = raw_content_type
                 else:
                     json_body = body
             else:
