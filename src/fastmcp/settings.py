@@ -185,13 +185,6 @@ class Settings(BaseSettings):
             return v.upper()
         return v
 
-    @field_validator("port")
-    @classmethod
-    def _validate_port(cls, v: int) -> int:
-        if not (1 <= v <= 65535):
-            raise ValueError(f"Port must be between 1 and 65535, got {v}")
-        return v
-
     docket: DocketSettings = DocketSettings()
 
     enable_rich_logging: Annotated[
@@ -265,7 +258,7 @@ class Settings(BaseSettings):
 
     # HTTP settings
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = Field(default=8000, ge=1, le=65535)
     sse_path: str = "/sse"
     message_path: str = "/messages/"
     streamable_http_path: str = "/mcp"
