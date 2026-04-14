@@ -1,5 +1,6 @@
 """Request director using openapi-core for stateless HTTP request building."""
 
+import io
 import json as _json
 from typing import Any, ClassVar
 from urllib.parse import quote, urljoin
@@ -105,10 +106,17 @@ class RequestDirector:
                 # treats them as form fields. Scalars must be stringified
                 # because httpx rejects non-string/bytes values in files=.
                 # Use _query_scalar_to_str for booleans (true/false, not True/False).
-                files = {
-                    k: v if isinstance(v, tuple) else (None, _query_scalar_to_str(v))
-                    for k, v in body.items()
-                }
+                files = {}
+                for k, v in body.items():
+                    if isinstance(v, tuple):
+                        files[k] = v
+                    elif isinstance(v, bytes | io.IOBase):
+                        # bytes and file-like objects are passed directly so
+                        # httpx can transmit them as binary parts without
+                        # stringifying to their Python repr.
+                        files[k] = (None, v)
+                    else:
+                        files[k] = (None, _query_scalar_to_str(v))
             elif (
                 declared_content_type == "application/x-www-form-urlencoded"
                 and isinstance(body, dict)

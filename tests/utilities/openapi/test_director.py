@@ -476,6 +476,33 @@ class TestContentTypeHandling:
         assert request.headers["content-type"] == "application/merge-patch+json"
         assert json.loads(request.content) == {"name": "test"}
 
+    def test_content_type_preserves_media_type_parameters(self, director):
+        """Media-type parameters like charset are preserved on the wire."""
+        route = HTTPRoute(
+            path="/items",
+            method="POST",
+            operation_id="create_item",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "application/json-patch+json; charset=utf-8": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    }
+                },
+            ),
+            parameter_map={
+                "name": {"location": "body", "openapi_name": "name"},
+            },
+        )
+
+        request = director.build(route, {"name": "test"}, "https://example.com")
+        assert (
+            request.headers["content-type"]
+            == "application/json-patch+json; charset=utf-8"
+        )
+        assert json.loads(request.content) == {"name": "test"}
+
     def test_custom_content_type_preserves_other_headers(self, director):
         """Custom content type doesn't clobber other headers from parameters."""
         route = HTTPRoute(
@@ -1321,6 +1348,36 @@ class TestContentTypeDispatch:
         body = request.content.decode("utf-8", errors="replace")
         assert "report.csv" in body
         assert "a,b,c" in body
+
+    def test_multipart_bare_bytes_not_stringified(self, director):
+        """Bare bytes values are passed directly to httpx, not repr-stringified."""
+        route = HTTPRoute(
+            path="/upload",
+            method="POST",
+            operation_id="upload_binary",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "multipart/form-data": {
+                        "type": "object",
+                        "properties": {
+                            "payload": {"type": "string", "format": "binary"},
+                        },
+                    }
+                },
+            ),
+            parameter_map={
+                "payload": {"location": "body", "openapi_name": "payload"},
+            },
+        )
+        raw = b"\x89PNG\r\n\x1a\nfake-image-data"
+        request = director.build(route, {"payload": raw})
+        content_type = request.headers.get("content-type", "")
+        assert "multipart/form-data" in content_type
+        request.read()
+        # The raw bytes should appear in the body verbatim, not as "b'\\x89PNG...'"
+        assert raw in request.content
+        assert b"b'" not in request.content
 
     def test_json_body_still_works(self, director, json_route):
         """application/json bodies should still be sent as JSON (regression)."""
