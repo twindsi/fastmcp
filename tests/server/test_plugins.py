@@ -8,6 +8,7 @@ from contextlib import suppress
 from importlib import metadata as importlib_metadata
 from importlib.metadata import version as dist_version
 from pathlib import Path
+from typing import Generic, TypeVar
 
 import pytest
 from packaging.version import Version
@@ -280,50 +281,170 @@ class TestPluginConstruction:
         assert P.meta.version == "2.0.0"
 
     def test_plugin_with_default_config(self):
+        """A Plugin without a generic parameter gets an empty default config."""
+
         class P(Plugin):
             meta = PluginMeta(name="p", version="0.1.0")
 
         p = P()
-        assert isinstance(p.config, Plugin.Config)
+        assert isinstance(p.config, BaseModel)
+        # No fields to inspect — the point is that construction works with None.
 
     def test_config_accepts_instance(self):
-        class P(Plugin):
+        class PConfig(BaseModel):
+            who: str = "world"
+
+        class P(Plugin[PConfig]):
             meta = PluginMeta(name="p", version="0.1.0")
 
-            class Config(BaseModel):
-                who: str = "world"
-
-        p = P(config=P.Config(who="jeremiah"))
-        assert isinstance(p.config, P.Config)
+        p = P(PConfig(who="jeremiah"))
+        assert isinstance(p.config, PConfig)
         assert p.config.who == "jeremiah"
 
     def test_config_accepts_dict(self):
-        class P(Plugin):
+        class PConfig(BaseModel):
+            who: str = "world"
+
+        class P(Plugin[PConfig]):
             meta = PluginMeta(name="p", version="0.1.0")
 
-            class Config(BaseModel):
-                who: str = "world"
-
-        p = P(config={"who": "jeremiah"})
-        assert isinstance(p.config, P.Config)
+        p = P({"who": "jeremiah"})
+        assert isinstance(p.config, PConfig)
         assert p.config.who == "jeremiah"
 
-    def test_invalid_config_raises_plugin_config_error(self):
+    def test_generic_parameter_binds_config_cls(self):
+        """`Plugin[ConfigType]` stashes the Config on the subclass so dict
+        validation, manifest generation, and runtime introspection all use
+        the author-declared model."""
+
+        class PConfig(BaseModel):
+            who: str = "world"
+
+        class P(Plugin[PConfig]):
+            meta = PluginMeta(name="p", version="0.1.0")
+
+        assert P._config_cls is PConfig
+
+    def test_unparameterized_plugin_uses_empty_default_config(self):
+        """A Plugin without a generic parameter gets an empty default that
+        rejects unknown keys (extra='forbid')."""
+
         class P(Plugin):
             meta = PluginMeta(name="p", version="0.1.0")
 
-            class Config(BaseModel):
-                count: int
+        # No-arg construction works.
+        P()
+        # Unknown config keys are rejected by the empty default.
+        with pytest.raises(PluginConfigError) as exc_info:
+            P({"who": "jeremiah"})
+        # The error message must not leak the `_EmptyConfig` implementation
+        # class name; users shouldn't see private framework detail.
+        assert "_EmptyConfig" not in str(exc_info.value)
+        assert "no config fields" in str(exc_info.value)
 
-        with pytest.raises(PluginConfigError):
-            P(config={"count": "not a number"})
+    def test_invalid_config_raises_plugin_config_error(self):
+        """Wrong-typed value for a declared field wraps ValidationError
+        into PluginConfigError — exercising the generic Plugin[C] path."""
+
+        class PConfig(BaseModel):
+            count: int
+
+        class P(Plugin[PConfig]):
+            meta = PluginMeta(name="p", version="0.1.0")
+
+        with pytest.raises(PluginConfigError, match="count"):
+            P({"count": "not a number"})
+
+    def test_required_field_missing_raises_plugin_config_error_on_no_args(self):
+        """Required config field with no default must surface as
+        PluginConfigError (not a raw pydantic.ValidationError) when the
+        plugin is constructed with no arguments."""
+
+        class PConfig(BaseModel):
+            api_key: str  # required, no default
+
+        class P(Plugin[PConfig]):
+            meta = PluginMeta(name="p", version="0.1.0")
+
+        with pytest.raises(PluginConfigError, match="api_key"):
+            P()
 
     def test_bad_config_type_raises(self):
         class P(Plugin):
             meta = PluginMeta(name="p", version="0.1.0")
 
         with pytest.raises(PluginConfigError):
-            P(config="not a config")  # ty: ignore[invalid-argument-type]
+            P("not a config")  # type: ignore[arg-type]
+
+    def test_non_basemodel_generic_arg_raises_at_class_creation(self):
+        """`Plugin[T]` where T is not a pydantic BaseModel must fail loudly.
+
+        The `# ty: ignore` tells the static checker that violating the type
+        bound is intentional here — we're exercising the *runtime* guard.
+        """
+
+        class NotAModel:
+            pass
+
+        with pytest.raises(TypeError, match="BaseModel subclass"):
+
+            class _Bad(Plugin[NotAModel]):  # ty: ignore[invalid-type-arguments]
+                meta = PluginMeta(name="bad", version="0.1.0")
+
+    def test_intermediate_generic_subclass_parameterization_is_not_misread_as_config(
+        self,
+    ):
+        """A concrete subclass of an intermediate Plugin base with its
+        own generic parameter must not have its generic arg misread as
+        the plugin's config type.
+
+        Given `class Intermediate(Plugin[Cfg], Generic[T])` and
+        `class Concrete(Intermediate[int])`, `int` is the intermediate's
+        own TypeVar substitution, NOT the plugin config. `Concrete`
+        should inherit `Cfg` through the intermediate, not raise because
+        `int` isn't a `BaseModel`.
+        """
+        _T = TypeVar("_T")
+
+        class Cfg(BaseModel):
+            value: int = 0
+
+        class Intermediate(Plugin[Cfg], Generic[_T]):
+            meta = PluginMeta(name="intermediate", version="0.1.0")
+
+        class Concrete(Intermediate[int]):
+            meta = PluginMeta(name="concrete", version="0.1.0")
+
+        assert Intermediate._config_cls is Cfg
+        assert Concrete._config_cls is Cfg
+        assert isinstance(Concrete().config, Cfg)
+
+    def test_deferred_config_binding_resolves_in_concrete_subclass(self):
+        """Abstract plugin bases declare `Plugin[_T]` with an unbound
+        TypeVar; concrete subclasses bind `_T` via `AbstractBase[Cfg]`.
+        The resolver must propagate the substitution through the chain.
+        """
+        _T = TypeVar("_T", bound=BaseModel)
+
+        class MyConfig(BaseModel):
+            api_key: str = "default"
+
+        class AbstractPlugin(Plugin[_T]):
+            meta = PluginMeta(name="abstract", version="0.1.0")
+
+        class ConcretePlugin(AbstractPlugin[MyConfig]):
+            meta = PluginMeta(name="concrete", version="0.1.0")
+
+        # Abstract base can't resolve (TypeVar still unbound).
+        assert AbstractPlugin._config_cls is not MyConfig
+        # Concrete leaf resolves through the intermediate.
+        assert ConcretePlugin._config_cls is MyConfig
+        assert isinstance(ConcretePlugin().config, MyConfig)
+        assert ConcretePlugin({"api_key": "secret"}).config.api_key == "secret"
+        # Manifest reflects the concrete config, not the empty default.
+        m = ConcretePlugin.manifest()
+        assert m is not None
+        assert "api_key" in m["config_schema"]["properties"]
 
 
 class TestPluginValidation:
@@ -1189,7 +1310,10 @@ class TestManifest:
     """manifest() produces a JSON-serializable dict and can write to disk."""
 
     def test_manifest_shape(self):
-        class P(Plugin):
+        class PConfig(BaseModel):
+            who: str = "world"
+
+        class P(Plugin[PConfig]):
             meta = PluginMeta(
                 name="p",
                 version="0.1.0",
@@ -1199,9 +1323,6 @@ class TestManifest:
                 fastmcp_version=">=3.0",
                 meta={"owning_team": "platform"},
             )
-
-            class Config(BaseModel):
-                who: str = "world"
 
         m = P.manifest()
         assert m is not None
@@ -1217,6 +1338,24 @@ class TestManifest:
         assert m["entry_point"].endswith(".P")
         assert m["config_schema"]["type"] == "object"
         assert "who" in m["config_schema"]["properties"]
+
+    def test_manifest_omits_empty_config_internal_name_and_docstring(self):
+        """For plugins without a Config, the manifest's `config_schema`
+        must not leak `_EmptyConfig` — neither as `title` nor as
+        `description` (pydantic emits both by default)."""
+
+        class P(Plugin):
+            meta = PluginMeta(name="p", version="0.1.0")
+
+        m = P.manifest()
+        assert m is not None
+        schema = m["config_schema"]
+        assert "_EmptyConfig" not in schema.get("title", "")
+        # Pydantic v2 emits the class docstring as `description`; strip it too.
+        assert (
+            "description" not in schema or "_EmptyConfig" not in schema["description"]
+        )
+        assert "Plugin[ConfigType]" not in schema.get("description", "")
 
     def test_manifest_custom_fields_subclass(self):
         class AcmeMeta(PluginMeta):

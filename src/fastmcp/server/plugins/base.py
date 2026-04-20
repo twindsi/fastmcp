@@ -2,8 +2,9 @@
 
 Plugins package server-side behavior — middleware, component transforms,
 providers, and custom HTTP routes — into reusable, configurable,
-distributable units. A plugin is a subclass of `Plugin` with a
-class-level `PluginMeta` and an optional nested `Config` model.
+distributable units. A plugin is a subclass of `Plugin` (optionally
+parameterized with a pydantic config model — `Plugin[MyConfig]` — for
+typed configuration).
 
 See the design document for the full specification.
 """
@@ -17,7 +18,16 @@ from contextlib import asynccontextmanager
 from email.message import Message as EmailMessage
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Generic,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -243,6 +253,20 @@ class PluginMeta(BaseModel):
 _DEFAULT_PLUGIN_VERSION = "0.1.0"
 
 
+class _EmptyConfig(BaseModel):
+    """Default config for plugins that don't declare their own via the
+    `Plugin[ConfigType]` generic parameter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+C = TypeVar("C", bound=BaseModel)
+"""Type variable for a plugin's config model. Bound to `BaseModel` so
+any pydantic model is valid. Plugins without a config omit the generic
+parameter; the runtime falls back to `_EmptyConfig` in that case.
+"""
+
+
 def _derive_plugin_name(cls_name: str) -> str:
     """Kebab-case a class name, stripping a trailing ``Plugin`` suffix.
 
@@ -259,7 +283,67 @@ def _derive_plugin_name(cls_name: str) -> str:
     return name
 
 
-class Plugin:
+def _resolve_plugin_config_cls(cls: type) -> type[BaseModel] | None:
+    """Resolve the config class bound to `Plugin[C]` for a subclass.
+
+    Walks `cls.__orig_bases__`, recursing through intermediate `Plugin`
+    subclasses and propagating TypeVar substitutions. Returns the bound
+    `BaseModel` subclass, or `None` if the binding is still a TypeVar
+    (unresolved — typically an intermediate abstract base).
+
+    Raises `TypeError` if a resolved argument is concrete but not a
+    `BaseModel` subclass (a misuse of `Plugin[NonPydanticType]`).
+    """
+
+    def _resolve(base: Any, substitutions: dict[Any, Any]) -> Any:
+        origin = get_origin(base)
+        if origin is None or not (
+            isinstance(origin, type) and issubclass(origin, Plugin)
+        ):
+            return None
+        args = get_args(base)
+        # Apply outer-scope substitutions so a parent's TypeVar bound to
+        # a concrete type at this level becomes that concrete type here.
+        resolved_args = tuple(substitutions.get(a, a) for a in args)
+
+        if origin is Plugin:
+            # We're at the root parameterization.
+            if not resolved_args:
+                return None
+            cfg = resolved_args[0]
+            # Still a TypeVar: unresolved at this level of the chain.
+            if isinstance(cfg, TypeVar):
+                return None
+            return cfg
+
+        # Intermediate Plugin subclass. Push down its own TypeVar
+        # substitutions (from its `__parameters__`) and recurse into its
+        # bases to find the Plugin parameterization.
+        origin_params = getattr(origin, "__parameters__", ())
+        new_subs = {
+            **substitutions,
+            **dict(zip(origin_params, resolved_args, strict=False)),
+        }
+        for inner in getattr(origin, "__orig_bases__", ()):
+            found = _resolve(inner, new_subs)
+            if found is not None:
+                return found
+        return None
+
+    for base in getattr(cls, "__orig_bases__", ()):
+        resolved = _resolve(base, substitutions={})
+        if resolved is None:
+            continue
+        if not (isinstance(resolved, type) and issubclass(resolved, BaseModel)):
+            raise TypeError(
+                f"{cls.__name__}: Plugin[...] generic parameter must be a "
+                f"pydantic BaseModel subclass, got {resolved!r}"
+            )
+        return resolved
+    return None
+
+
+class Plugin(Generic[C]):
     """Base class for FastMCP plugins.
 
     Subclass to define a plugin. A subclass may optionally declare a
@@ -267,31 +351,29 @@ class Plugin:
     a default is derived from the class name (kebab-cased, trailing
     `Plugin` stripped) with version `0.1.0`. Declare `meta` explicitly
     when publishing or when Horizon/registry-facing metadata matters.
-    Subclasses may also declare a nested `Config` (subclass of
-    `pydantic.BaseModel`) describing configuration, and override any of
-    the lifecycle and contribution hooks.
+
+    **Config typing.** Parameterize `Plugin` with a pydantic model to
+    give your plugin typed configuration — `self.config.<field>` is then
+    correctly typed in editors and type checkers, and passing a dict or
+    model instance to the constructor validates against the model.
+    Plugins without a config omit the parameter.
 
     Example:
         ```python
-        from fastmcp.server.plugins import Plugin, PluginMeta
         from pydantic import BaseModel
+        from fastmcp.server.plugins import Plugin, PluginMeta
 
 
-        class PIIRedactor(Plugin):
-            meta = PluginMeta(
-                name="pii-redactor",
-                version="0.3.0",
-                dependencies=[
-                    "fastmcp-plugin-pii>=0.3.0",
-                    "regex>=2024.0",
-                ],
-            )
+        class PIIRedactorConfig(BaseModel):
+            patterns: list[str] = ["ssn", "email"]
 
-            class Config(BaseModel):
-                patterns: list[str] = ["ssn", "email"]
+
+        class PIIRedactor(Plugin[PIIRedactorConfig]):
+            meta = PluginMeta(name="pii-redactor", version="0.3.0")
 
             def middleware(self):
-                return [PIIMiddleware(self.config)]
+                # self.config is typed as PIIRedactorConfig
+                return [PIIMiddleware(self.config.patterns)]
         ```
     """
 
@@ -302,6 +384,16 @@ class Plugin:
     `PluginMeta.from_package(...)`) explicitly when publishing or when
     Horizon/registry-facing metadata matters.
     """
+
+    _config_cls: ClassVar[type[BaseModel]] = _EmptyConfig
+    """Config model class resolved from the `Plugin[C]` generic parameter.
+    Auto-populated by `__init_subclass__`; falls back to `_EmptyConfig`
+    for plugins that don't parameterize `Plugin`.
+    """
+
+    config: C
+    """The validated config instance. Typed as `C`, the generic
+    parameter, so `self.config.<field>` type-checks correctly."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -314,13 +406,17 @@ class Plugin:
                 name=_derive_plugin_name(cls.__name__),
                 version=_DEFAULT_PLUGIN_VERSION,
             )
-
-    class Config(BaseModel):
-        """Default empty configuration. Subclasses override to declare fields."""
-
-        model_config = ConfigDict(extra="forbid")
-
-    config: BaseModel
+        # Resolve the Config model from the generic parameter. We walk the
+        # `__orig_bases__` chain and propagate TypeVar substitutions, so
+        # both direct parameterization (`class P(Plugin[Cfg])`) and
+        # deferred binding (`class Abstract(Plugin[_T])` →
+        # `class P(Abstract[Cfg])`) resolve correctly. Intermediate
+        # generic bases with their own unrelated TypeVars are unaffected
+        # because we substitute through each step rather than treating
+        # `args[0]` as the config unconditionally.
+        config_cls = _resolve_plugin_config_cls(cls)
+        if config_cls is not None:
+            cls._config_cls = config_cls
 
     # Framework-internal marker. Set to True by `FastMCP.add_plugin` when
     # the plugin is added from inside another plugin's setup() (the loader
@@ -329,12 +425,7 @@ class Plugin:
     # across lifespan cycles.
     _fastmcp_ephemeral: bool = False
 
-    def __init__(self, config: BaseModel | dict[str, Any] | None = None) -> None:
-        # A subclass's nested Config is a distinct class from Plugin.Config;
-        # we accept any BaseModel instance here and validate at runtime that
-        # it's (or coerces to) the subclass's own Config type. This is why
-        # `config` is typed as BaseModel rather than the nested Config — the
-        # nested declaration does not imply subclass relationship.
+    def __init__(self, config: C | dict[str, Any] | None = None) -> None:
         meta = getattr(type(self), "meta", None)
         if not isinstance(meta, PluginMeta):
             raise TypeError(
@@ -343,24 +434,54 @@ class Plugin:
             )
         self._validate_meta(meta)
 
-        config_cls = type(self).Config
+        config_cls = type(self)._config_cls
+
+        def _wrap(exc: ValidationError) -> PluginConfigError:
+            # For unparameterized plugins, pydantic's error string
+            # includes "1 validation error for _EmptyConfig" — an
+            # internal class name users shouldn't see. Emit a scoped
+            # message instead; for parameterized plugins, forward
+            # pydantic's full diagnostic.
+            if config_cls is _EmptyConfig:
+                keys = list(config.keys()) if isinstance(config, dict) else []
+                return PluginConfigError(
+                    f"Invalid configuration for {type(self).__name__}: this "
+                    f"plugin declares no config fields but received "
+                    f"{keys}."
+                )
+            return PluginConfigError(
+                f"Invalid configuration for {type(self).__name__}: {exc}"
+            )
+
         if config is None:
-            value: BaseModel = config_cls()
+            try:
+                value: BaseModel = config_cls()
+            except ValidationError as exc:
+                # Required config fields with no default: surface the
+                # failure as PluginConfigError so callers that catch
+                # the documented exception type behave consistently
+                # with the dict path below.
+                raise _wrap(exc) from exc
         elif isinstance(config, config_cls):
             value = config
         elif isinstance(config, dict):
             try:
                 value = config_cls(**config)
             except ValidationError as exc:
-                raise PluginConfigError(
-                    f"Invalid configuration for {type(self).__name__}: {exc}"
-                ) from exc
+                raise _wrap(exc) from exc
         else:
-            raise PluginConfigError(
-                f"Config for {type(self).__name__} must be a {config_cls.__name__} "
-                f"instance or dict, not {type(config).__name__}"
+            # `_EmptyConfig` is an internal implementation detail for
+            # unparameterized plugins. Don't leak its name to authors.
+            expected = (
+                "dict"
+                if config_cls is _EmptyConfig
+                else f"{config_cls.__name__} instance or dict"
             )
-        self.config = value
+            raise PluginConfigError(
+                f"Config for {type(self).__name__} must be a {expected}, "
+                f"not {type(config).__name__}"
+            )
+        self.config = cast(C, value)
 
     # -- validation -----------------------------------------------------------
 
@@ -542,11 +663,20 @@ class Plugin:
         # have produced from a live plugin instance.
         cls._validate_meta(meta)
 
-        config_cls = getattr(cls, "Config", Plugin.Config)
+        config_cls = cls._config_cls
+        config_schema = config_cls.model_json_schema()
+        # `_EmptyConfig` is an internal implementation detail; don't
+        # leak its name or docstring into the published manifest JSON
+        # consumed by Horizon, registries, and CI tooling. Pydantic v2
+        # emits both `title` (from `__name__`) and `description` (from
+        # the class docstring) in `model_json_schema()`; strip both.
+        if config_cls is _EmptyConfig:
+            config_schema.pop("title", None)
+            config_schema.pop("description", None)
         data: dict[str, Any] = {
             "manifest_version": 1,
             **meta.model_dump(),
-            "config_schema": config_cls.model_json_schema(),
+            "config_schema": config_schema,
             "entry_point": f"{cls.__module__}:{cls.__qualname__}",
         }
 
