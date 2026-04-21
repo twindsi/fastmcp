@@ -33,6 +33,7 @@ INSTRUMENTATION_NAME = "fastmcp"
 
 TRACE_PARENT_KEY = "traceparent"
 TRACE_STATE_KEY = "tracestate"
+BAGGAGE_KEY = "baggage"
 
 
 def get_tracer(version: str | None = None) -> Tracer:
@@ -67,6 +68,8 @@ def inject_trace_context(
         trace_meta[TRACE_PARENT_KEY] = carrier["traceparent"]
     if "tracestate" in carrier:
         trace_meta[TRACE_STATE_KEY] = carrier["tracestate"]
+    if BAGGAGE_KEY in carrier:
+        trace_meta[BAGGAGE_KEY] = carrier[BAGGAGE_KEY]
 
     if trace_meta:
         return {**(meta or {}), **trace_meta}
@@ -112,6 +115,7 @@ def extract_trace_context(meta: dict[str, Any] | None) -> Context:
 
 
 __all__ = [
+    "BAGGAGE_KEY",
     "INSTRUMENTATION_NAME",
     "TRACE_PARENT_KEY",
     "TRACE_STATE_KEY",

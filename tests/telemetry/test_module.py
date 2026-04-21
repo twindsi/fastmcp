@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from opentelemetry import trace
+from opentelemetry import baggage, trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from fastmcp.server.telemetry import get_auth_span_attributes
 from fastmcp.telemetry import (
+    BAGGAGE_KEY,
     INSTRUMENTATION_NAME,
     TRACE_PARENT_KEY,
     extract_trace_context,
@@ -49,6 +51,19 @@ class TestInjectTraceContext:
         assert meta is not None
         assert TRACE_PARENT_KEY in meta
         assert meta[TRACE_PARENT_KEY].startswith("00-")
+
+    def test_injects_baggage(self, trace_exporter: InMemorySpanExporter):
+        tracer = get_tracer()
+        baggage_token = otel_context.attach(baggage.set_baggage("userId", "alice"))
+        try:
+            with tracer.start_as_current_span("test"):
+                meta = inject_trace_context()
+        finally:
+            otel_context.detach(baggage_token)
+
+        assert meta is not None
+        assert BAGGAGE_KEY in meta
+        assert "userId=alice" in str(meta[BAGGAGE_KEY])
 
 
 class TestExtractTraceContext:
