@@ -390,12 +390,18 @@ class FastMCP(
             lifespan=_lifespan_proxy(fastmcp_server=self),
         )
 
-        # User-declared auth is stored separately so the plugin
-        # contribution pipeline can rebuild `self.auth` from scratch each
-        # time (original auth + all non-ephemeral plugin contributions)
-        # rather than trying to undo its own mutations on teardown.
-        self._user_declared_auth: AuthProvider | None = auth
-        self.auth: AuthProvider | None = auth
+        # `auth` is a managed property. The setter initialises both `_auth`
+        # (the current value) and `_user_declared_auth` (the baseline used
+        # every time `_rebuild_auth` recompose from scratch). Framework-
+        # internal assignments (from `_rebuild_auth` / `add_plugin`) bypass
+        # the setter and write to `_auth` directly, so they never clobber
+        # the user-declared baseline.
+        self.auth = auth
+
+        # True once `http_app()` has been called. Used by `add_plugin()` to
+        # detect loader-time auth changes that would arrive too late for the
+        # Starlette app's auth middleware snapshot (see guard in add_plugin).
+        self._http_app_built: bool = False
 
         if tools:
             for tool in tools:
@@ -489,6 +495,26 @@ class FastMCP(
             return list(self._mcp_server.icons)
 
     @property
+    def auth(self) -> AuthProvider | None:
+        """The active auth provider.
+
+        Managed by the plugin contribution pipeline: framework-internal
+        assignments (from `_rebuild_auth` / `add_plugin`) write directly to
+        `_auth` and do not update `_user_declared_auth`, so recomposition
+        never silently discards a value the user set explicitly.
+
+        Direct post-init assignment (`mcp.auth = X`) is supported; it
+        updates both the live value and the user-declared baseline so the
+        next recomposition honours the change.
+        """
+        return self._auth
+
+    @auth.setter
+    def auth(self, value: AuthProvider | None) -> None:
+        self._auth: AuthProvider | None = value
+        self._user_declared_auth: AuthProvider | None = value
+
+    @property
     def local_provider(self) -> LocalProvider:
         """The server's local provider, which stores directly-registered components.
 
@@ -577,6 +603,26 @@ class FastMCP(
         # but callers would see only the exception.
         next_auth = self._compose_auth([*self.plugins, plugin])
 
+        # Loader-time auth guard: when we're inside a lifespan setup pass
+        # for an HTTP/SSE transport, the Starlette app has already been
+        # built with `auth` snapshotted at `http_app()` call time.
+        # Updating `self.auth` here would not rewire `RequireAuthMiddleware`
+        # — the server could silently start with the wrong auth config.
+        # Raise early rather than permit an invisible misconfiguration.
+        if (
+            self._in_plugin_setup_pass
+            and self._http_app_built
+            and next_auth is not self._auth
+        ):
+            raise PluginError(
+                f"Plugin {plugin.meta.name!r} would change the auth "
+                "configuration during lifespan setup, but the HTTP/SSE "
+                "Starlette app has already snapshotted `auth` at "
+                "`http_app()` time. Register this plugin before calling "
+                "`http_app()` / `run_http_async()`, not from inside a "
+                "loader plugin's `run()`."
+            )
+
         self.plugins.append(plugin)
         # Flag loader-added plugins as ephemeral so teardown can remove
         # them along with their contributions. Written unconditionally so
@@ -596,7 +642,9 @@ class FastMCP(
         # lifespan enters. Without this, a plugin-contributed `AuthProvider`
         # would never wire into `RequireAuthMiddleware`, leaving HTTP
         # routes unprotected despite the auth contribution.
-        self.auth = next_auth
+        # Bypass the property setter — this is a framework-managed write,
+        # not a user assignment, so `_user_declared_auth` must stay intact.
+        self._auth = next_auth
 
     async def _enter_plugin_contexts(self, stack: AsyncExitStack) -> None:
         """Enter each registered plugin's `run()` context on the given stack.
@@ -729,8 +777,12 @@ class FastMCP(
         single mutation point for code paths (ephemeral-plugin teardown)
         that have already adjusted `self.plugins` and want
         `self.auth` to reflect the new state.
+
+        Writes to `_auth` directly to bypass the property setter:
+        recomposition must not update `_user_declared_auth`, which stores
+        the user's explicit declaration as the stable baseline.
         """
-        self.auth = self._compose_auth(self.plugins)
+        self._auth = self._compose_auth(self.plugins)
 
     def _compose_auth(self, plugins: list[Plugin]) -> AuthProvider | None:
         """Pick the single auth provider from user-declared auth + plugin contributions.
@@ -751,8 +803,6 @@ class FastMCP(
         state and commit only on success. Also called by
         `_rebuild_auth` after ephemeral-plugin teardown.
         """
-        from fastmcp.server.plugins.base import PluginError
-
         sources: list[tuple[str, AuthProvider]] = []
         if self._user_declared_auth is not None:
             sources.append(("user-declared auth=", self._user_declared_auth))

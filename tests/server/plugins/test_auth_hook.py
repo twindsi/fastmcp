@@ -269,6 +269,100 @@ class TestAddPluginAtomicity:
         assert id(p2) not in mcp._plugin_contributions
 
 
+class TestPostInitAuthAssignment:
+    def test_post_init_assignment_respected_by_rebuild(self):
+        """Assigning `mcp.auth = X` after construction must be honoured by
+        subsequent `_rebuild_auth()` calls — it updates the user-declared
+        baseline, not just the transient composed value."""
+        v = _verifier()
+        mcp = FastMCP("t")
+        assert mcp.auth is None
+
+        mcp.auth = v
+        assert mcp.auth is v
+
+        # Simulate a rebuild (e.g. ephemeral cleanup) — value must survive.
+        mcp._rebuild_auth()
+        assert mcp.auth is v
+
+    def test_post_init_assignment_counts_as_user_declared(self):
+        """A post-init `mcp.auth = X` should conflict with a plugin
+        contribution just like a construction-time `auth=` does — it
+        is user-declared, not plugin-contributed."""
+        v1, v2 = _verifier("u"), _verifier("p")
+        mcp = FastMCP("t")
+        mcp.auth = v1  # post-init declaration
+
+        class P(Plugin):
+            meta = PluginMeta(name="p")
+
+            def auth(self) -> AuthProvider | None:
+                return v2
+
+        with pytest.raises(PluginError, match="Multiple auth sources"):
+            mcp.add_plugin(P())
+
+
+class TestLoaderTimeHttpAuthGuard:
+    def test_loader_auth_change_raises_when_http_app_built(self):
+        """If `http_app()` has already been called (Starlette app built, auth
+        snapshotted), a loader plugin that would change `self.auth` must be
+        rejected — silently updating `self.auth` at that point would not
+        rewire RequireAuthMiddleware and could leave HTTP routes unprotected."""
+        v = _verifier()
+        mcp = FastMCP("t")
+        mcp._http_app_built = True  # simulate that http_app() was already called
+
+        class P(Plugin):
+            meta = PluginMeta(name="p")
+
+            def auth(self) -> AuthProvider | None:
+                return v
+
+        mcp._in_plugin_setup_pass = True
+        try:
+            with pytest.raises(PluginError, match="already snapshotted"):
+                mcp.add_plugin(P())
+        finally:
+            mcp._in_plugin_setup_pass = False
+
+    def test_loader_no_auth_change_allowed_when_http_app_built(self):
+        """A loader plugin that contributes no auth is still permitted even
+        after the HTTP app has been built — the guard only fires when auth
+        would change."""
+        mcp = FastMCP("t")
+        mcp._http_app_built = True
+
+        class NoAuth(Plugin):
+            meta = PluginMeta(name="na")
+
+        mcp._in_plugin_setup_pass = True
+        try:
+            mcp.add_plugin(NoAuth())  # must not raise
+        finally:
+            mcp._in_plugin_setup_pass = False
+
+    def test_loader_auth_allowed_without_http_app(self):
+        """For stdio transports (no HTTP app built), loader-time auth changes
+        are valid — stdio does not snapshot auth at app-build time."""
+        v = _verifier()
+        mcp = FastMCP("t")
+        # _http_app_built stays False (stdio)
+
+        class P(Plugin):
+            meta = PluginMeta(name="p")
+
+            def auth(self) -> AuthProvider | None:
+                return v
+
+        mcp._in_plugin_setup_pass = True
+        try:
+            mcp.add_plugin(P())  # must not raise for stdio
+        finally:
+            mcp._in_plugin_setup_pass = False
+        assert mcp.auth is v
+
+
 class TestDuplicateInstanceDedup:
     def test_same_instance_registered_twice_contributes_once(self):
         """Registering the same plugin instance twice is explicitly
