@@ -152,9 +152,11 @@ class TestMultipleServersRejected:
             def auth(self) -> list[AuthProvider]:
                 return [s2]
 
-        mcp = FastMCP("t", plugins=[P1(), P2()])
+        # Fires eagerly at add_plugin time now that auth composes during
+        # registration (so HTTP transports see the composed auth before
+        # their Starlette apps are built).
         with pytest.raises(PluginError, match="Multiple auth providers"):
-            await _enter_lifecycle(mcp)
+            FastMCP("t", plugins=[P1(), P2()])
 
 
 class TestRebuildOnEphemeralTeardown:
@@ -201,3 +203,65 @@ class TestRebuildOnEphemeralTeardown:
         # should be back to just the permanent verifier (unwrapped, since
         # single contribution).
         assert mcp.auth is permanent_v
+
+
+class TestEagerComposition:
+    def test_self_auth_is_set_before_lifespan(self):
+        """HTTP/SSE transports snapshot `self.auth` when they build the
+        Starlette app, which happens before lifespan entry. Plugin auth
+        must therefore be composed at `add_plugin` time, not just during
+        lifespan. Without this, HTTP routes would come up without the
+        plugin-contributed auth wired into `RequireAuthMiddleware`."""
+        v = _verifier()
+
+        class P(Plugin):
+            meta = PluginMeta(name="p")
+
+            def auth(self) -> list[AuthProvider]:
+                return [v]
+
+        mcp = FastMCP("t", plugins=[P()])
+        # No lifespan entered yet — construction only.
+        assert mcp.auth is v
+
+    def test_add_plugin_rebuilds_auth(self):
+        """Plugin added after construction (outside a loader context)
+        should still trigger auth rebuild so late-added plugins'
+        contributions land in `self.auth`."""
+        v = _verifier()
+        mcp = FastMCP("t")
+        assert mcp.auth is None
+
+        class P(Plugin):
+            meta = PluginMeta(name="p")
+
+            def auth(self) -> list[AuthProvider]:
+                return [v]
+
+        mcp.add_plugin(P())
+        assert mcp.auth is v
+
+
+class TestDuplicateInstanceDedup:
+    def test_same_instance_registered_twice_contributes_once(self):
+        """Registering the same plugin instance twice is explicitly
+        supported. Auth contributions must be deduped by instance id —
+        otherwise the single instance's verifier would appear twice in
+        the composed MultiAuth, changing verification order, or a single
+        server-contributing instance would falsely trip the 'Multiple
+        auth providers' guard."""
+
+        class ServerContrib(Plugin):
+            meta = PluginMeta(name="s")
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._server = _FakeServerAuth()
+
+            def auth(self) -> list[AuthProvider]:
+                return [self._server]
+
+        p = ServerContrib()
+        # Must not raise even though `p` is in `self.plugins` twice.
+        mcp = FastMCP("t", plugins=[p, p])
+        assert mcp.auth is p._server

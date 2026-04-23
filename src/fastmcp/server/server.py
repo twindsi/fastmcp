@@ -580,6 +580,15 @@ class FastMCP(
             self._additional_http_routes.append(route)
             records.append((self._additional_http_routes, route))
 
+        # Auth must be composed eagerly at `add_plugin` time — not just
+        # during lifespan entry — because HTTP/SSE transports (`run_http_async`,
+        # `create_streamable_http_app`, `create_sse_app`) snapshot `self.auth`
+        # when they build the Starlette app, and that happens BEFORE lifespan
+        # enters. Without this, a plugin-contributed `AuthProvider` would
+        # never wire into `RequireAuthMiddleware`, leaving HTTP routes
+        # unprotected despite the auth contribution.
+        self._rebuild_auth()
+
     async def _enter_plugin_contexts(self, stack: AsyncExitStack) -> None:
         """Enter each registered plugin's `run()` context on the given stack.
 
@@ -722,8 +731,16 @@ class FastMCP(
         from fastmcp.server.auth.auth import MultiAuth, TokenVerifier
         from fastmcp.server.plugins.base import PluginError
 
+        # Dedupe by plugin instance id so registering the same instance
+        # twice (an explicitly supported pattern) doesn't double-apply
+        # auth contributions. Other contribution paths already use
+        # `_plugins_contributed` / `_plugins_entered` for the same reason.
+        seen: set[int] = set()
         contributions: list[AuthProvider] = []
         for plugin in self.plugins:
+            if id(plugin) in seen:
+                continue
+            seen.add(id(plugin))
             contributions.extend(plugin.auth())
 
         if not contributions:
