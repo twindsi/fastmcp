@@ -568,6 +568,15 @@ class FastMCP(
         # Compute routes up front so a failure inside plugin.routes() does
         # not leave a half-registered plugin in self.plugins.
         routes = list(plugin.routes())
+
+        # Compose auth BEFORE mutating server state: a failing auth
+        # composition (e.g. "Multiple auth providers" PluginError) must
+        # leave the plugin fully un-registered so callers can catch and
+        # recover. If we appended first and composed after, a raise from
+        # `_rebuild_auth` would leave the plugin + its routes attached
+        # but callers would see only the exception.
+        next_auth = self._compose_auth([*self.plugins, plugin])
+
         self.plugins.append(plugin)
         # Flag loader-added plugins as ephemeral so teardown can remove
         # them along with their contributions. Written unconditionally so
@@ -580,14 +589,14 @@ class FastMCP(
             self._additional_http_routes.append(route)
             records.append((self._additional_http_routes, route))
 
-        # Auth must be composed eagerly at `add_plugin` time — not just
-        # during lifespan entry — because HTTP/SSE transports (`run_http_async`,
+        # Auth is composed eagerly at `add_plugin` time — not just during
+        # lifespan entry — because HTTP/SSE transports (`run_http_async`,
         # `create_streamable_http_app`, `create_sse_app`) snapshot `self.auth`
-        # when they build the Starlette app, and that happens BEFORE lifespan
-        # enters. Without this, a plugin-contributed `AuthProvider` would
-        # never wire into `RequireAuthMiddleware`, leaving HTTP routes
-        # unprotected despite the auth contribution.
-        self._rebuild_auth()
+        # when they build the Starlette app, and that happens BEFORE
+        # lifespan enters. Without this, a plugin-contributed `AuthProvider`
+        # would never wire into `RequireAuthMiddleware`, leaving HTTP
+        # routes unprotected despite the auth contribution.
+        self.auth = next_auth
 
     async def _enter_plugin_contexts(self, stack: AsyncExitStack) -> None:
         """Enter each registered plugin's `run()` context on the given stack.
@@ -714,19 +723,30 @@ class FastMCP(
         self._rebuild_auth()
 
     def _rebuild_auth(self) -> None:
-        """Recompose `self.auth` from user-declared auth + plugin contributions.
+        """Recompose and install `self.auth` from the current plugin list.
 
-        Partitions `AuthProvider` contributions into a single "server"
-        slot (full auth providers owning OAuth routes/metadata) and a
-        verifiers list (`TokenVerifier` instances tried in order). Raises
-        `PluginError` if more than one full server would result — MultiAuth
-        has a single server slot and resolving precedence automatically
-        would hide real configuration bugs.
+        Thin wrapper around the pure `_compose_auth` — exists as a
+        single mutation point for code paths (ephemeral-plugin teardown)
+        that have already adjusted `self.plugins` and want
+        `self.auth` to reflect the new state.
+        """
+        self.auth = self._compose_auth(self.plugins)
 
-        Composition is deterministic and side-effect-free beyond mutating
-        `self.auth`, so the ephemeral-plugin teardown path calls this
-        after removing contributions to return to the permanent-only
-        state.
+    def _compose_auth(self, plugins: list[Plugin]) -> AuthProvider | None:
+        """Compute the composed auth for a given plugin list. Pure.
+
+        Partitions user-declared auth + plugin contributions into a
+        single "server" slot (full auth providers owning OAuth routes
+        and metadata) and a verifiers list (`TokenVerifier` instances
+        tried in order). Raises `PluginError` if more than one full
+        server would result — `MultiAuth` has a single server slot and
+        resolving precedence automatically would hide real config bugs.
+
+        Pure so `add_plugin` can trial-run it (against a list that
+        includes the about-to-be-added plugin) BEFORE mutating server
+        state, then commit only on success. Also called by
+        `_rebuild_auth` after ephemeral-plugin teardown has already
+        adjusted `self.plugins`.
         """
         from fastmcp.server.auth.auth import MultiAuth, TokenVerifier
         from fastmcp.server.plugins.base import PluginError
@@ -737,15 +757,14 @@ class FastMCP(
         # `_plugins_contributed` / `_plugins_entered` for the same reason.
         seen: set[int] = set()
         contributions: list[AuthProvider] = []
-        for plugin in self.plugins:
+        for plugin in plugins:
             if id(plugin) in seen:
                 continue
             seen.add(id(plugin))
             contributions.extend(plugin.auth())
 
         if not contributions:
-            self.auth = self._user_declared_auth
-            return
+            return self._user_declared_auth
 
         servers: list[AuthProvider] = []
         verifiers: list[TokenVerifier] = []
@@ -775,10 +794,9 @@ class FastMCP(
         # contribs; or one plugin contributed a single TokenVerifier) —
         # don't wrap in MultiAuth needlessly.
         if len(servers) + len(verifiers) == 1:
-            self.auth = (servers or verifiers)[0]
-            return
+            return (servers or verifiers)[0]
 
-        self.auth = MultiAuth(
+        return MultiAuth(
             server=servers[0] if servers else None,
             verifiers=verifiers or None,
         )

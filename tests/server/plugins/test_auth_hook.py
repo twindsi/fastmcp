@@ -242,6 +242,40 @@ class TestEagerComposition:
         assert mcp.auth is v
 
 
+class TestAddPluginAtomicity:
+    def test_rejected_plugin_not_attached(self):
+        """A plugin whose auth contribution would trip the 'Multiple
+        auth providers' guard must be fully rolled back: not appended to
+        `self.plugins`, no routes attached, no stale `_plugin_contributions`
+        records. Otherwise catching the error can't recover — subsequent
+        rebuilds would still include the rejected plugin."""
+
+        class ServerPlugin(Plugin):
+            meta = PluginMeta(name="server-plugin")
+
+            def __init__(self, name: str) -> None:
+                super().__init__()
+                self._server = _FakeServerAuth(f"https://{name}.example")
+
+            def auth(self) -> list[AuthProvider]:
+                return [self._server]
+
+        p1 = ServerPlugin("one")
+        mcp = FastMCP("t", plugins=[p1])
+        assert mcp.plugins == [p1]
+        assert mcp.auth is p1._server
+
+        # Second server-contributing plugin must be rejected without
+        # leaving residue in server state.
+        p2 = ServerPlugin("two")
+        with pytest.raises(PluginError, match="Multiple auth providers"):
+            mcp.add_plugin(p2)
+
+        assert mcp.plugins == [p1]
+        assert mcp.auth is p1._server
+        assert id(p2) not in mcp._plugin_contributions
+
+
 class TestDuplicateInstanceDedup:
     def test_same_instance_registered_twice_contributes_once(self):
         """Registering the same plugin instance twice is explicitly
