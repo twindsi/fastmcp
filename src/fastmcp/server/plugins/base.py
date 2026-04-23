@@ -687,22 +687,28 @@ class Plugin(Generic[C]):
         return []
 
     def auth(self) -> list[AuthProvider]:
-        """Return auth providers to compose into the server's auth pipeline.
+        """Return auth providers to contribute to the server's auth slot.
 
-        Any `AuthProvider` subclass is accepted — `TokenVerifier` (machine-
-        to-machine token checks), `OAuthProvider` / `RemoteAuthProvider` /
-        any full-server provider that owns OAuth routes and metadata, or
-        even a pre-composed `MultiAuth`.
+        Any `AuthProvider` subclass is accepted — a `TokenVerifier`, a
+        full OAuth server (`OAuthProvider` / `RemoteAuthProvider` /
+        `OAuthProxy`), or a pre-composed `MultiAuth`.
 
-        The framework collects contributions across all plugins, combines
-        them with any `auth=` the server was constructed with, and wraps
-        the result in a `MultiAuth` when more than one source is present.
-        `TokenVerifier` contributions become verifiers; anything else is
-        treated as a full server. At most one server contribution is
-        allowed across the user-declared auth and all plugins combined —
-        multiple full servers would be ambiguous (MultiAuth has a single
-        server slot). A `PluginError` is raised if this invariant is
-        violated.
+        FastMCP's auth slot is **singular**. Across the user-declared
+        `auth=` and every plugin's `auth()` return, at most one
+        `AuthProvider` may be active. Multiple contributors raise
+        `PluginError` with an error that names every source so the
+        operator can resolve the conflict explicitly.
+
+        **Best practice for plugins that contribute auth**: expose a
+        config knob (conventionally `enable_auth: bool = True`) so users
+        who want the plugin's other features but prefer different auth
+        can disable it without framework-level composition rules. Return
+        an empty list when the knob is off.
+
+        For genuine multi-source auth, users construct a `MultiAuth`
+        explicitly and pass it as the single `auth=` arg — the framework
+        never auto-composes, because silent composition produces
+        surprising behavior at token-verification time.
 
         The default returns an empty list.
         """

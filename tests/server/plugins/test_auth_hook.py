@@ -1,4 +1,10 @@
-"""Tests for the `Plugin.auth()` contribution hook (FMCP-24)."""
+"""Tests for the `Plugin.auth()` contribution hook (FMCP-24).
+
+Semantic rule: FastMCP's auth slot is singular. `auth=` + every plugin's
+`auth()` return are collected; at most one `AuthProvider` may be active.
+Multiple sources raise `PluginError` — no automatic `MultiAuth` wrapping.
+Users who want multi-source auth build `MultiAuth` explicitly.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ import contextlib
 import pytest
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.auth import AuthProvider, MultiAuth, TokenVerifier
+from fastmcp.server.auth.auth import AuthProvider, TokenVerifier
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.plugins.base import Plugin, PluginError, PluginMeta
 
@@ -18,7 +24,7 @@ def _verifier(token: str = "t") -> TokenVerifier:
 
 class _FakeServerAuth(AuthProvider):
     """Minimal non-TokenVerifier AuthProvider — stands in for an OAuth
-    server in partition logic tests without needing a real issuer URL."""
+    server in tests without needing a real issuer URL."""
 
     def __init__(self, base_url: str = "https://example.com") -> None:
         super().__init__(base_url=base_url)
@@ -41,28 +47,40 @@ class TestDefaultHook:
         assert P().auth() == []
 
 
-class TestSingleContribution:
-    async def test_lone_verifier_not_wrapped(self):
-        """A single auth contribution (and no user-declared auth) should
-        land on `self.auth` directly rather than being wrapped in a
-        MultiAuth. MultiAuth is a composition primitive — using it for
-        a single source is clutter."""
+class TestSingleSource:
+    async def test_lone_plugin_contribution_becomes_self_auth(self):
+        """One plugin contributing one AuthProvider, no user `auth=` → that
+        provider is installed directly as `self.auth`. No wrapping."""
         v = _verifier()
 
-        class AddVerifier(Plugin):
-            meta = PluginMeta(name="verifier")
+        class P(Plugin):
+            meta = PluginMeta(name="p")
 
             def auth(self) -> list[AuthProvider]:
                 return [v]
 
-        mcp = FastMCP("t", plugins=[AddVerifier()])
+        mcp = FastMCP("t", plugins=[P()])
         await _enter_lifecycle(mcp)
-
         assert mcp.auth is v
 
+    async def test_user_declared_alone_untouched(self):
+        """No plugin contributing auth → `self.auth` is exactly the user
+        value, no processing."""
+        user_v = _verifier()
+        mcp = FastMCP("t", auth=user_v)
+        await _enter_lifecycle(mcp)
+        assert mcp.auth is user_v
 
-class TestMultipleVerifiers:
-    async def test_multiple_verifier_plugins_wrap_in_multiauth(self):
+    async def test_no_sources_leaves_auth_none(self):
+        mcp = FastMCP("t")
+        await _enter_lifecycle(mcp)
+        assert mcp.auth is None
+
+
+class TestMultipleSourcesRejected:
+    """FastMCP's auth slot is singular. Multiple contributors raise."""
+
+    async def test_two_plugin_verifiers_raises(self):
         v1, v2 = _verifier("one"), _verifier("two")
 
         class P1(Plugin):
@@ -77,16 +95,12 @@ class TestMultipleVerifiers:
             def auth(self) -> list[AuthProvider]:
                 return [v2]
 
-        mcp = FastMCP("t", plugins=[P1(), P2()])
-        await _enter_lifecycle(mcp)
+        with pytest.raises(PluginError, match="Multiple auth sources"):
+            FastMCP("t", plugins=[P1(), P2()])
 
-        assert isinstance(mcp.auth, MultiAuth)
-        assert mcp.auth.server is None
-        assert mcp.auth.verifiers == [v1, v2]
-
-
-class TestUserDeclaredAuthCombined:
-    async def test_user_verifier_plus_plugin_verifier(self):
+    async def test_user_plus_plugin_raises(self):
+        """User-declared `auth=` + any plugin contribution is ambiguous —
+        framework doesn't silently pick a winner."""
         user_v, plugin_v = _verifier("u"), _verifier("p")
 
         class P(Plugin):
@@ -95,48 +109,11 @@ class TestUserDeclaredAuthCombined:
             def auth(self) -> list[AuthProvider]:
                 return [plugin_v]
 
-        mcp = FastMCP("t", auth=user_v, plugins=[P()])
-        await _enter_lifecycle(mcp)
+        with pytest.raises(PluginError, match="Multiple auth sources"):
+            FastMCP("t", auth=user_v, plugins=[P()])
 
-        assert isinstance(mcp.auth, MultiAuth)
-        # User verifier first, then plugin's.
-        assert mcp.auth.verifiers == [user_v, plugin_v]
-        assert mcp.auth.server is None
-
-    async def test_user_declared_alone_is_not_wrapped(self):
-        """No plugins contributing auth → `self.auth` is exactly the user
-        value, no composition overhead."""
-        user_v = _verifier()
-        mcp = FastMCP("t", auth=user_v)
-        await _enter_lifecycle(mcp)
-
-        assert mcp.auth is user_v
-
-
-class TestServerPlusVerifiers:
-    async def test_oauth_server_with_plugin_verifier(self):
-        """OAuth provider in `auth=` + plugin-contributed TokenVerifier
-        compose into MultiAuth(server=oauth, verifiers=[v])."""
-
-        server = _FakeServerAuth()
-        v = _verifier()
-
-        class P(Plugin):
-            meta = PluginMeta(name="p")
-
-            def auth(self) -> list[AuthProvider]:
-                return [v]
-
-        mcp = FastMCP("t", auth=server, plugins=[P()])
-        await _enter_lifecycle(mcp)
-
-        assert isinstance(mcp.auth, MultiAuth)
-        assert mcp.auth.server is server
-        assert mcp.auth.verifiers == [v]
-
-
-class TestMultipleServersRejected:
-    async def test_two_plugin_servers_raises(self):
+    async def test_two_server_contributions_raises(self):
+        """Also covers the server-server case (historical multiauth reason)."""
         s1 = _FakeServerAuth("https://a.example")
         s2 = _FakeServerAuth("https://b.example")
 
@@ -152,11 +129,32 @@ class TestMultipleServersRejected:
             def auth(self) -> list[AuthProvider]:
                 return [s2]
 
-        # Fires eagerly at add_plugin time now that auth composes during
-        # registration (so HTTP transports see the composed auth before
-        # their Starlette apps are built).
-        with pytest.raises(PluginError, match="Multiple auth providers"):
+        with pytest.raises(PluginError, match="Multiple auth sources"):
             FastMCP("t", plugins=[P1(), P2()])
+
+    async def test_error_names_every_source(self):
+        """Operator needs to know which sources conflict so they can
+        disable auth on all but one."""
+        v1, v2 = _verifier("a"), _verifier("b")
+
+        class Alpha(Plugin):
+            meta = PluginMeta(name="alpha")
+
+            def auth(self) -> list[AuthProvider]:
+                return [v1]
+
+        class Beta(Plugin):
+            meta = PluginMeta(name="beta")
+
+            def auth(self) -> list[AuthProvider]:
+                return [v2]
+
+        with pytest.raises(PluginError) as exc_info:
+            FastMCP("t", plugins=[Alpha(), Beta()])
+
+        msg = str(exc_info.value)
+        assert "'alpha'" in msg
+        assert "'beta'" in msg
 
 
 class TestRebuildOnEphemeralTeardown:
@@ -165,14 +163,12 @@ class TestRebuildOnEphemeralTeardown:
         stripped from `self.auth` when the plugin is torn down — the
         resolver rebuilds from scratch to avoid bespoke per-plugin
         accounting in the auth slot."""
-        permanent_v = _verifier("perm")
         ephemeral_v = _verifier("temp")
 
-        class Permanent(Plugin):
-            meta = PluginMeta(name="perm")
-
-            def auth(self) -> list[AuthProvider]:
-                return [permanent_v]
+        # Start with NO permanent auth so the ephemeral plugin has a
+        # conflict-free slot to contribute into.
+        mcp = FastMCP("t")
+        assert mcp.auth is None
 
         class Ephemeral(Plugin):
             meta = PluginMeta(name="temp")
@@ -180,11 +176,9 @@ class TestRebuildOnEphemeralTeardown:
             def auth(self) -> list[AuthProvider]:
                 return [ephemeral_v]
 
-        mcp = FastMCP("t", plugins=[Permanent()])
-
         async with contextlib.AsyncExitStack() as stack:
             await mcp._enter_plugin_contexts(stack)
-            assert mcp.auth is permanent_v
+            assert mcp.auth is None
 
             # Simulate a loader adding a plugin during lifespan.
             mcp._in_plugin_setup_pass = True
@@ -192,17 +186,11 @@ class TestRebuildOnEphemeralTeardown:
                 mcp.add_plugin(Ephemeral())
             finally:
                 mcp._in_plugin_setup_pass = False
-            # Loader-added plugins have their contributions collected on
-            # subsequent lifespan entries; for the test, re-run
-            # contribution collection manually by re-entering contexts.
             await mcp._enter_plugin_contexts(stack)
-            assert isinstance(mcp.auth, MultiAuth)
-            assert mcp.auth.verifiers == [permanent_v, ephemeral_v]
+            assert mcp.auth is ephemeral_v
 
-        # After stack exit ephemeral teardown fires and auth rebuilds;
-        # should be back to just the permanent verifier (unwrapped, since
-        # single contribution).
-        assert mcp.auth is permanent_v
+        # After stack exit ephemeral teardown fires and auth rebuilds.
+        assert mcp.auth is None
 
 
 class TestEagerComposition:
@@ -224,10 +212,9 @@ class TestEagerComposition:
         # No lifespan entered yet — construction only.
         assert mcp.auth is v
 
-    def test_add_plugin_rebuilds_auth(self):
+    def test_add_plugin_installs_auth(self):
         """Plugin added after construction (outside a loader context)
-        should still trigger auth rebuild so late-added plugins'
-        contributions land in `self.auth`."""
+        should install its auth eagerly so HTTP transports see it."""
         v = _verifier()
         mcp = FastMCP("t")
         assert mcp.auth is None
@@ -244,35 +231,41 @@ class TestEagerComposition:
 
 class TestAddPluginAtomicity:
     def test_rejected_plugin_not_attached(self):
-        """A plugin whose auth contribution would trip the 'Multiple
-        auth providers' guard must be fully rolled back: not appended to
-        `self.plugins`, no routes attached, no stale `_plugin_contributions`
-        records. Otherwise catching the error can't recover — subsequent
-        rebuilds would still include the rejected plugin."""
+        """A plugin whose auth contribution would trip the 'Multiple auth
+        sources' guard must be fully rolled back: not appended to
+        `self.plugins`, no routes attached, no stale
+        `_plugin_contributions` records. Otherwise catching the error
+        can't recover — subsequent rebuilds would still include the
+        rejected plugin."""
+        v1 = _verifier("one")
 
-        class ServerPlugin(Plugin):
-            meta = PluginMeta(name="server-plugin")
-
-            def __init__(self, name: str) -> None:
-                super().__init__()
-                self._server = _FakeServerAuth(f"https://{name}.example")
+        class P1(Plugin):
+            meta = PluginMeta(name="p1")
 
             def auth(self) -> list[AuthProvider]:
-                return [self._server]
+                return [v1]
 
-        p1 = ServerPlugin("one")
+        class P2(Plugin):
+            meta = PluginMeta(name="p2")
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._v = _verifier("two")
+
+            def auth(self) -> list[AuthProvider]:
+                return [self._v]
+
+        p1 = P1()
         mcp = FastMCP("t", plugins=[p1])
         assert mcp.plugins == [p1]
-        assert mcp.auth is p1._server
+        assert mcp.auth is v1
 
-        # Second server-contributing plugin must be rejected without
-        # leaving residue in server state.
-        p2 = ServerPlugin("two")
-        with pytest.raises(PluginError, match="Multiple auth providers"):
+        p2 = P2()
+        with pytest.raises(PluginError, match="Multiple auth sources"):
             mcp.add_plugin(p2)
 
         assert mcp.plugins == [p1]
-        assert mcp.auth is p1._server
+        assert mcp.auth is v1
         assert id(p2) not in mcp._plugin_contributions
 
 
@@ -280,22 +273,20 @@ class TestDuplicateInstanceDedup:
     def test_same_instance_registered_twice_contributes_once(self):
         """Registering the same plugin instance twice is explicitly
         supported. Auth contributions must be deduped by instance id —
-        otherwise the single instance's verifier would appear twice in
-        the composed MultiAuth, changing verification order, or a single
-        server-contributing instance would falsely trip the 'Multiple
-        auth providers' guard."""
+        otherwise a single auth-contributing instance would falsely trip
+        the 'Multiple auth sources' guard."""
 
-        class ServerContrib(Plugin):
+        class Contrib(Plugin):
             meta = PluginMeta(name="s")
 
             def __init__(self) -> None:
                 super().__init__()
-                self._server = _FakeServerAuth()
+                self._v = _verifier()
 
             def auth(self) -> list[AuthProvider]:
-                return [self._server]
+                return [self._v]
 
-        p = ServerContrib()
+        p = Contrib()
         # Must not raise even though `p` is in `self.plugins` twice.
         mcp = FastMCP("t", plugins=[p, p])
-        assert mcp.auth is p._server
+        assert mcp.auth is p._v

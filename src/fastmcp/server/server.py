@@ -733,72 +733,54 @@ class FastMCP(
         self.auth = self._compose_auth(self.plugins)
 
     def _compose_auth(self, plugins: list[Plugin]) -> AuthProvider | None:
-        """Compute the composed auth for a given plugin list. Pure.
+        """Pick the single auth provider from user-declared auth + plugin contributions.
 
-        Partitions user-declared auth + plugin contributions into a
-        single "server" slot (full auth providers owning OAuth routes
-        and metadata) and a verifiers list (`TokenVerifier` instances
-        tried in order). Raises `PluginError` if more than one full
-        server would result — `MultiAuth` has a single server slot and
-        resolving precedence automatically would hide real config bugs.
+        FastMCP's auth slot is singular. If zero sources declare auth,
+        `self.auth` stays `None`. If exactly one source declares auth —
+        user-declared `auth=` or one plugin's `auth()` return — it wins.
+        If two or more sources declare auth, this raises `PluginError`
+        naming every source so the operator can resolve the ambiguity
+        explicitly (typically by disabling auth on one of the plugins
+        via its own config). We never auto-compose into `MultiAuth`:
+        silent composition surprises users at auth time, and the cases
+        where someone genuinely wants multi-source auth are better
+        handled by constructing `MultiAuth` explicitly in Python and
+        passing it as the single `auth=`.
 
-        Pure so `add_plugin` can trial-run it (against a list that
-        includes the about-to-be-added plugin) BEFORE mutating server
-        state, then commit only on success. Also called by
-        `_rebuild_auth` after ephemeral-plugin teardown has already
-        adjusted `self.plugins`.
+        Pure so `add_plugin` can trial-run it BEFORE mutating server
+        state and commit only on success. Also called by
+        `_rebuild_auth` after ephemeral-plugin teardown.
         """
-        from fastmcp.server.auth.auth import MultiAuth, TokenVerifier
         from fastmcp.server.plugins.base import PluginError
 
+        sources: list[tuple[str, AuthProvider]] = []
+        if self._user_declared_auth is not None:
+            sources.append(("user-declared auth=", self._user_declared_auth))
+
         # Dedupe by plugin instance id so registering the same instance
-        # twice (an explicitly supported pattern) doesn't double-apply
-        # auth contributions. Other contribution paths already use
+        # twice (an explicitly supported pattern) doesn't double-count
+        # its auth contribution. Other contribution paths already use
         # `_plugins_contributed` / `_plugins_entered` for the same reason.
         seen: set[int] = set()
-        contributions: list[AuthProvider] = []
         for plugin in plugins:
             if id(plugin) in seen:
                 continue
             seen.add(id(plugin))
-            contributions.extend(plugin.auth())
+            origin = f"plugin {plugin.meta.name!r}"
+            sources.extend((origin, contrib) for contrib in plugin.auth())
 
-        if not contributions:
-            return self._user_declared_auth
+        if not sources:
+            return None
+        if len(sources) == 1:
+            return sources[0][1]
 
-        servers: list[AuthProvider] = []
-        verifiers: list[TokenVerifier] = []
-
-        def _partition(provider: AuthProvider) -> None:
-            if isinstance(provider, TokenVerifier):
-                verifiers.append(provider)
-            else:
-                servers.append(provider)
-
-        if self._user_declared_auth is not None:
-            _partition(self._user_declared_auth)
-        for contrib in contributions:
-            _partition(contrib)
-
-        if len(servers) > 1:
-            raise PluginError(
-                "Multiple auth providers contributed a full server "
-                f"(got {len(servers)}). MultiAuth supports a single server "
-                "slot; multiple full OAuth providers can't be composed "
-                "automatically. If you need this, construct a MultiAuth "
-                "explicitly and pass it via `auth=` or contribute it from "
-                "one plugin."
-            )
-
-        # Single contribution total (e.g. user declared auth, no plugin
-        # contribs; or one plugin contributed a single TokenVerifier) —
-        # don't wrap in MultiAuth needlessly.
-        if len(servers) + len(verifiers) == 1:
-            return (servers or verifiers)[0]
-
-        return MultiAuth(
-            server=servers[0] if servers else None,
-            verifiers=verifiers or None,
+        origins = ", ".join(origin for origin, _ in sources)
+        raise PluginError(
+            f"Multiple auth sources declared: {origins}. FastMCP accepts a "
+            "single auth provider. Resolve the ambiguity by disabling auth "
+            "on all but one source (e.g. via the plugin's own config), or "
+            "for genuine multi-source auth, construct a `MultiAuth` "
+            "explicitly in Python and pass it as the single `auth=` arg."
         )
 
     def _apply_plugin_capabilities(
