@@ -12,7 +12,7 @@
     "decoration": "gradient"
   },
   "banner": {
-    "content": "Deploy FastMCP servers for free on [Prefect Horizon](https://www.prefect.io/horizon)"
+    "content": "Meet [Prefect Horizon, the enterprise MCP gateway built by the team behind FastMCP](https://prefect.io/horizon)"
   },
   "colors": {
     "dark": "#f72585",
