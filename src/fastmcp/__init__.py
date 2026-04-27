@@ -35,6 +35,14 @@ __author__ = "FastMCP Contributors"
 # e.g. if fastmcp.VERSION_INFO >= (0, 2, 0): ...
 VERSION_INFO = tuple(int(x) for x in __version__.split("."))
 
+# NOTE: VERSION_INFO only works correctly for numeric version segments.
+# If upstream ever adopts pre-release suffixes like "0.2.0a1", this will
+# raise a ValueError. Using a try/except here to fail gracefully instead.
+try:
+    VERSION_INFO = tuple(int(x) for x in __version__.split("."))
+except ValueError:
+    VERSION_INFO = (0, 0, 0)
+
 __all__ = [
     "FastMCP",
     "Resource",
