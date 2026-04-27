@@ -16,6 +16,10 @@ Basic usage:
         mcp.run()
 
 Note: Also exposes __version__ for easy version checking via fastmcp.__version__
+
+Fork notes:
+    - Tracking upstream: PrefectHQ/fastmcp
+    - Personal additions are kept minimal to make rebasing easier
 """
 
 from fastmcp.server import FastMCP
