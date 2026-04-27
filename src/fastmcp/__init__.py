@@ -14,6 +14,8 @@ Basic usage:
 
     if __name__ == "__main__":
         mcp.run()
+
+Note: Also exposes __version__ for easy version checking via fastmcp.__version__
 """
 
 from fastmcp.server import FastMCP
@@ -25,6 +27,10 @@ from fastmcp.exceptions import FastMCPError
 __version__ = "0.1.0"
 __author__ = "FastMCP Contributors"
 
+# Expose version info as a tuple for easier programmatic comparisons
+# e.g. if fastmcp.VERSION_INFO >= (0, 2, 0): ...
+VERSION_INFO = tuple(int(x) for x in __version__.split("."))
+
 __all__ = [
     "FastMCP",
     "Resource",
@@ -32,4 +38,5 @@ __all__ = [
     "Prompt",
     "FastMCPError",
     "__version__",
+    "VERSION_INFO",
 ]
